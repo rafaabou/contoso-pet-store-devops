@@ -1,0 +1,15 @@
+---
+# ============================================
+# Default variables for monitoring role
+# NOTE: All values are defined in inventory/group_vars/all.yml
+# These are fallback defaults only.
+# ============================================
+
+prometheus_version: "2.53.3"
+prometheus_retention: "30d"
+prometheus_scrape_interval: "15s"
+alertmanager_version: "0.27.0"
+prometheus_port: 9090
+alertmanager_port: 9093
+grafana_port: 3000
+# grafana_password MUST be set in group_vars - no default here for security

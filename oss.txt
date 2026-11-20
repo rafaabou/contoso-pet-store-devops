@@ -1,0 +1,111 @@
+Client ID
+2fcc9257-710c-4d51-9904-7024befed24c
+Client secret
+*******
+Lost your secret? 
+Application name
+grafana
+Redirect URIs. Please use a new line for every URI.
+https://grafana.devops-devsecops.kdns.fr/login/generic_oauth
+
+incus exec k3s-vault -- bash -c "export VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true; export VAULT_TOKEN=\$(jq -r .root_token /root/vault-init.json); vault kv put kv/sso/grafana client_id=2fcc9257-710c-4d51-9904-7024befed24c client_secret=*******
+
+
+Edit OAuth2 Application
+OAuth2 applications gives your third-party application access to user accounts on this instance.
+
+Client ID
+90ece481-00e5-4df6-9d19-b2b4cd6d226b
+Client secret
+*******
+Lost your secret? 
+Application name
+argocd
+Redirect URIs. Please use a new line for every URI.
+https://argocd.devops-devsecops.kdns.fr/api/dex/callback
+
+
+incus exec k3s-vault -- bash -c "export VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true; export VAULT_TOKEN=\$(jq -r .root_token /root/vault-init.json); vault kv put kv/sso/argocd client_id=90ece481-00e5-4df6-9d19-b2b4cd6d226b client_secret=*******
+
+
+Edit OAuth2 Application
+OAuth2 applications gives your third-party application access to user accounts on this instance.
+
+Client ID
+a6c0f0ff-50f2-4d3a-b713-c279cd5085e2
+Client secret
+*******
+Lost your secret? 
+Application name
+sonarqube
+Redirect URIs. Please use a new line for every URI.
+https://sonar.devops-devsecops.kdns.fr/oauth2/callback
+
+incus exec k3s-vault -- bash -c "export VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true; export VAULT_TOKEN=\$(jq -r .root_token /root/vault-init.json); vault kv put kv/sso/sonarqube client_id=a6c0f0ff-50f2-4d3a-b713-c279cd5085e2 client_secret=*******
+
+Edit OAuth2 Application
+OAuth2 applications gives your third-party application access to user accounts on this instance.
+
+Client ID
+cf811d79-45c2-48b4-94bf-34b2bc6be2cf
+Client secret
+*******
+Lost your secret? 
+Application name
+minio
+Redirect URIs. Please use a new line for every URI.
+https://minio.devops-devsecops.kdns.fr/oauth_callback
+
+incus exec k3s-vault -- bash -c "export VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true; export VAULT_TOKEN=\$(jq -r .root_token /root/vault-init.json); vault kv put kv/sso/minio client_id=cf811d79-45c2-48b4-94bf-34b2bc6be2cf client_secret=*******
+
+Edit OAuth2 Application
+OAuth2 applications gives your third-party application access to user accounts on this instance.
+
+Client ID
+1a2e9a8a-810a-4a40-a295-4b682f854cc1
+Client secret
+*******
+Lost your secret? 
+Application name
+vault
+Redirect URIs. Please use a new line for every URI.
+https://vault.devops-devsecops.kdns.fr/ui/vault/auth/oidc/oidc/callback
+
+
+incus exec k3s-vault -- bash -c "export VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true; export VAULT_TOKEN=\$(jq -r .root_token /root/vault-init.json); vault kv put kv/sso/vault client_id=1a2e9a8a-810a-4a40-a295-4b682f854cc1 client_secret=*******
+
+
+
+antix@antix:~/Videos/Store-App_Soruce_Code-GitHub/ansible-opentofu/ansible$ incus exec k3s-vault -- bash -c "export VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true; export VAULT_TOKEN=\$(jq -r .root_token /root/vault-init.json); vault kv list kv/sso/"
+
+======= to see =====
+Keys
+----
+argocd
+grafana
+minio
+sonarqube
+vault
+
+
+
+==========================
+
+
+Gateway UIs (LAN/VPN + valid cert)
+ 1. https://alertmanager.devops-devsecops.kdns.fr
+ 2. https://grafana.devops-devsecops.kdns.fr
+ 3. https://jaeger.devops-devsecops.kdns.fr
+ 4. https://prometheus.devops-devsecops.kdns.fr
+ 5. https://sonar.devops-devsecops.kdns.fr (503 while service stopped)
+ 6. https://vault.devops-devsecops.kdns.fr
+ 7. https://forgejo.devops-devsecops.kdns.fr
+ 8. https://argocd.devops-devsecops.kdns.fr
+ 9. https://minio.devops-devsecops.kdns.fr
+10. https://s3.devops-devsecops.kdns.fr (API only — 403 in browser is healthy)
+API-shaped (no webpage by design)
+11. https://loki.devops-devsecops.kdns.fr/loki/api/v1/labels (root 404 is correct)
+12. https://otel.devops-devsecops.kdns.fr (no UI exists — nothing to open)
+Public
+13. https://devops-devsecops.kdns.fr
+

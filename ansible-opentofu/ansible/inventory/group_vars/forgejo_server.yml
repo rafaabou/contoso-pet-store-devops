@@ -1,0 +1,4 @@
+# TASK-262: light jobs run on the Forgejo VM itself (single trusted user).
+forgejo_runner_label_name: light
+forgejo_runner_labels: "ci-light:host"
+forgejo_runner_capacity: 1

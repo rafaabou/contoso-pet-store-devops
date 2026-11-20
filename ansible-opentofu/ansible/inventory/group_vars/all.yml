@@ -1,0 +1,127 @@
+---
+# ============================================
+# Global Variables for Production Setup
+# ============================================
+
+# Cluster
+k3s_version: "v1.36.4+k3s1"
+cluster_name: "production"
+
+# Networking
+metallb_pool: "10.195.94.100-10.195.94.150"
+domain: "devops-devsecops.kdns.fr"
+letsencrypt_email: "rafaabou@proton.me"
+
+# Vault Server
+vault_server_ip: "10.195.94.200"
+vault_version: "1.15.4"
+vault_ui: true
+vault_dev_mode: false
+
+# Monitoring Server (dedicated VM)
+monitoring_server_ip: "10.195.94.210"
+
+# Prometheus
+prometheus_version: "2.53.3"
+prometheus_retention: "30d"
+prometheus_scrape_interval: "15s"
+prometheus_port: 9090
+
+# Alertmanager
+alertmanager_version: "0.27.0"
+# blackbox_exporter pin (TASK-263 step 2). 404 on download = bump to latest
+# upstream release (fail loud by design, one-line fix here).
+blackbox_version: "0.27.0"
+alertmanager_port: 9093
+
+# Grafana (CHANGE PASSWORD - stored here for lab use, use Vault in production)
+grafana_port: 3000
+grafana_password: *******
+
+# OpenTelemetry
+otel_version: "0.112.0"
+otel_grpc_port: 4317
+otel_http_port: 4318
+
+# Jaeger
+jaeger_version: "1.62.0"
+jaeger_ui_port: 16686
+
+# Loki
+loki_version: "3.2.1"
+loki_port: 3100
+loki_retention: "7d"
+
+# K3s cluster nodes
+k3s_master_ip: "10.195.94.80"
+k3s_master_tailscale_ip: "100.119.206.35"
+k3s_worker1_ip: "10.195.94.81"
+k3s_worker2_ip: "100.100.13.113"
+
+# Security
+enable_rbac: true
+enable_network_policies: true
+enable_pod_security: true
+
+# SonarQube + Community Branch Plugin versions are pinned INDEPENDENTLY
+# (plugin lags SQ by months — never derive plugin version from SQ version).
+# Matched pair: SQ 26.5.0.122743 + plugin 26.5.0 (plugin declares support
+# per SQ minor; running 26.9 + plugin 26.5 showed no plugin lines in logs).
+# PC2 bridge IP (reference only; Ansible + consumers use Tailscale via ansible_host)
+sonarqube_ip: "10.195.95.220"
+sonarqube_port: 9000
+sonarqube_version: "26.5.0.122743"
+sonarqube_plugin_version: "26.5.0"
+
+# NFS
+nfs_server_ip: "10.195.94.80"
+
+# Component versions (centralized - all roles use these)
+cert_manager_version: "v1.16.3"
+metallb_version: "v0.14.9"
+argocd_version: "v2.12.5"
+# Latest chart in istio Helm repo as of 2026-09-09 (1.31 announced but
+# charts not yet published; 1.30.x supports K8s 1.32-1.36 incl. our K3s 1.36)
+istio_version: "1.30.4"
+node_exporter_version: "1.8.2"
+minio_version: "RELEASE.2024-12-13T22-19-12Z"
+
+# TASK-262: Forgejo CI (docs latest verified 2026-09-09)
+forgejo_version: "16.0.3"
+# CLI refuses username "admin" (reserved since Forgejo 16 — ERROR 92).
+forgejo_admin_user: "sysadmin"
+forgejo_runner_version: "latest"   # resolved once at install, recorded on disk
+forgejo_domain: "forgejo.{{ domain }}"
+forgejo_http_port: 3000
+# Runners register + poll DIRECT (not via Gateway .100: PC2 cannot route
+# PC1's bridge — ERROR 61/73 family). Tailscale IP, plain HTTP, same tailnet.
+forgejo_runner_instance: "http://100.88.159.38:3000"
+# Server-minted registration tokens (ERROR 97): UI copy-paste failed 5 rounds.
+# The server mints one global token per label; runners fetch machine-to-machine.
+forgejo_managed_runner_labels: ["light", "heavy"]
+# Tailscale IP of k3s-forgejo-ci (NOT the PC2 bridge IP — gateway pod on
+# master reaches PC2 only via Tailscale). Live since 2026-09-09.
+forgejo_ext_ip: "100.88.159.38"
+# Direct-LAN origins for Gateway-exposed UIs (bridge IPs: gateway pod lives
+# on PC1 LAN, same network — no Tailscale needed here).
+mon_ext_ip: "10.195.94.210"
+vault_ext_ip: "10.195.94.200"
+postgres_version: "16"
+
+# Istio ingress gateway (pinned first MetalLB IP = wildcard DNS target)
+istio_gateway_ip: "10.195.94.100"
+
+# SonarQube external endpoint for the Gateway ServiceEntry.
+# MUST be Tailscale-routable from master (PC2 bridge .95.x is invisible).
+sonarqube_ext_ip: "100.73.135.124"
+
+# Vault (Cloudflare token for cert-manager DNS-01 lives at kv/cloudflare)
+# Secret seeded once by user: vault kv put kv/cloudflare api_token=<token>
+vault_addr: "https://{{ vault_server_ip }}:8200"
+vault_kv_mount: "kv"
+vault_cloudflare_name: "cloudflare"
+vault_cloudflare_path: "kv/cloudflare"
+
+# MinIO credentials (CHANGE - use Vault in production)
+minio_root_user: "minioadmin"
+minio_root_password: *******

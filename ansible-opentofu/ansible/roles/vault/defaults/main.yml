@@ -1,0 +1,5 @@
+---
+# Vault role defaults
+vault_version: "1.15.4"
+vault_ui: true
+vault_dev_mode: false

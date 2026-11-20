@@ -1,0 +1,14 @@
+---
+# ============================================
+# Playbook: Monitoring Server Setup
+# Install Prometheus + Grafana + Alertmanager
+# on dedicated monitoring VM
+# Run: ansible-playbook playbooks/site-monitoring.yml
+# ============================================
+
+- name: Install monitoring stack on dedicated server
+  hosts: monitoring_server
+  become: true
+  roles:
+    - monitoring
+    - blackbox

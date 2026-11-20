@@ -1,0 +1,206 @@
+# ============================================
+# Role: cert-manager
+# Install cert-manager + Let's Encrypt DNS-01 issuer (Cloudflare).
+# HTTP-01 cannot work here: cluster IPs are private (10.x), Let's
+# Encrypt can't reach them. DNS-01 proves ownership via Cloudflare API.
+# Cloudflare token lives in Vault at kv/cloudflare (field: api_token),
+# seeded once by the operator — never in git.
+# ============================================
+---
+- name: Check if cert-manager is installed
+  command: kubectl get ns cert-manager
+  register: cm_ns
+  changed_when: false
+  ignore_errors: yes
+  tags: [cert-manager, install]
+
+- name: Install cert-manager
+  command: "kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml"
+  when: cm_ns.rc != 0
+  tags: [cert-manager, install]
+
+- name: Wait for cert-manager pods
+  command: >
+    kubectl wait --namespace cert-manager
+    --for=condition=ready pod
+    --selector=app.kubernetes.io/instance=cert-manager
+    --timeout=180s
+  when: cm_ns.rc != 0
+  tags: [cert-manager, install]
+
+# --- Vault: ensure unsealed + fetch Cloudflare token ---
+
+- name: Read Vault init file (root token + unseal key)
+  slurp:
+    src: /root/vault-init.json
+  register: vault_init_b64
+  delegate_to: "{{ groups['vault_server'][0] }}"
+  tags: [cert-manager, vault]
+
+- name: Parse Vault credentials
+  set_fact:
+    vault_root_token: "{{ (vault_init_b64.content | b64decode | from_json).root_token }}"
+    vault_unseal_key: "{{ (vault_init_b64.content | b64decode | from_json).unseal_keys_b64[0] }}"
+  no_log: true
+  tags: [cert-manager, vault]
+
+- name: Check Vault seal status
+  uri:
+    url: "{{ vault_addr }}/v1/sys/seal-status"
+    validate_certs: no
+  register: vault_seal
+  tags: [cert-manager, vault]
+
+- name: Unseal Vault if sealed
+  uri:
+    url: "{{ vault_addr }}/v1/sys/unseal"
+    method: PUT
+    body_format: json
+    body:
+      key: "{{ vault_unseal_key }}"
+    validate_certs: no
+  when: vault_seal.json.sealed | default(true)
+  tags: [cert-manager, vault]
+
+# KV v1 and v2 have different HTTP API shapes (v1: /v1/<mount>/<name>,
+# value at .data.<field>; v2: /v1/<mount>/data/<name>, value at
+# .data.data.<field>). Detect the mounted version, then read accordingly.
+- name: Detect KV engine version at mount
+  uri:
+    url: "{{ vault_addr }}/v1/sys/mounts/{{ vault_kv_mount }}"
+    headers:
+      X-Vault-Token: "{{ vault_root_token }}"
+    validate_certs: no
+  register: kv_mount_info
+  tags: [cert-manager, vault]
+
+- name: Set KV version fact
+  set_fact:
+    kv_is_v2: "{{ (kv_mount_info.json.data.options.version | default('1')) | string == '2' }}"
+  tags: [cert-manager, vault]
+
+- name: Fetch Cloudflare token from Vault (KV v2 path)
+  uri:
+    url: "{{ vault_addr }}/v1/{{ vault_kv_mount }}/data/{{ vault_cloudflare_name }}"
+    headers:
+      X-Vault-Token: "{{ vault_root_token }}"
+    validate_certs: no
+    status_code: [200, 404]
+  register: cf_secret
+  when: kv_is_v2
+  tags: [cert-manager, vault]
+
+- name: Fetch Cloudflare token from Vault (KV v1 path)
+  uri:
+    url: "{{ vault_addr }}/v1/{{ vault_kv_mount }}/{{ vault_cloudflare_name }}"
+    headers:
+      X-Vault-Token: "{{ vault_root_token }}"
+    validate_certs: no
+    status_code: [200, 404]
+  register: cf_secret_v1
+  when: not kv_is_v2
+  tags: [cert-manager, vault]
+
+- name: Normalize fetched secret (v1 vs v2 shape)
+  set_fact:
+    cf_status: "{{ (cf_secret.status | default(404)) if kv_is_v2 else (cf_secret_v1.status | default(404)) }}"
+    cf_token: "{{ (cf_secret.json.data.data.api_token | default('')) if kv_is_v2 else (cf_secret_v1.json.data.api_token | default('')) }}"
+  tags: [cert-manager, vault]
+
+- name: Fail with seeding instructions if token missing
+  fail:
+    msg: |
+      Vault has no Cloudflare token at {{ vault_cloudflare_path }}.
+      Seed it once (on the vault host), then re-run:
+        export VAULT_ADDR='{{ vault_addr }}' VAULT_SKIP_VERIFY=true
+        vault login <root-token-from-/root/vault-init.json>
+        vault kv put {{ vault_cloudflare_path }} api_token=<CLOUDFLARE_API_TOKEN>
+      Get the token: Cloudflare dashboard → My Profile → API Tokens → Create (Edit zone DNS, zone devops-devsecops.kdns.fr).
+  when: cf_status == 404 or (cf_token | length == 0)
+  tags: [cert-manager, vault]
+
+- name: Set Cloudflare token fact
+  set_fact:
+    cloudflare_api_token: "{{ cf_token }}"
+  no_log: true
+  tags: [cert-manager, vault]
+
+# --- Cloudflare secret + DNS-01 ClusterIssuer ---
+
+- name: Create Cloudflare API token secret
+  shell: |
+    kubectl -n cert-manager create secret generic cloudflare-api-token-secret \
+      --from-literal=api-token='{{ cloudflare_api_token }}' \
+      --dry-run=client -o yaml | kubectl apply -f -
+  no_log: true
+  tags: [cert-manager, issuer]
+
+- name: Check if ClusterIssuer exists
+  command: kubectl get clusterissuer letsencrypt-prod
+  register: issuer_check
+  changed_when: false
+  ignore_errors: yes
+  tags: [cert-manager, issuer]
+
+- name: Create Let's Encrypt DNS-01 ClusterIssuer (Cloudflare)
+  shell: |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: cert-manager.io/v1
+    kind: ClusterIssuer
+    metadata:
+      name: letsencrypt-prod
+    spec:
+      acme:
+        server: https://acme-v02.api.letsencrypt.org/directory
+        email: {{ letsencrypt_email }}
+        privateKeySecretRef:
+          name: letsencrypt-prod
+        solvers:
+        - dns01:
+            cloudflare:
+              apiTokenSecretRef:
+                name: cloudflare-api-token-secret
+                key: api-token
+    EOF
+  when: issuer_check.rc != 0
+  tags: [cert-manager, issuer]
+
+# --- Wildcard certificate for the Istio Gateway ---
+
+- name: Ensure istio-ingress namespace exists (for wildcard cert)
+  shell: kubectl create namespace istio-ingress --dry-run=client -o yaml | kubectl apply -f -
+  register: ingress_ns
+  changed_when: "'created' in ingress_ns.stdout"
+  tags: [cert-manager, cert]
+
+- name: Request wildcard certificate
+  shell: |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: cert-manager.io/v1
+    kind: Certificate
+    metadata:
+      name: wildcard-tls
+      namespace: istio-ingress
+    spec:
+      secretName: wildcard-tls
+      issuerRef:
+        name: letsencrypt-prod
+        kind: ClusterIssuer
+      dnsNames:
+      - "*.{{ domain }}"
+    EOF
+  tags: [cert-manager, cert]
+
+- name: Wait for wildcard certificate Ready
+  command: kubectl -n istio-ingress wait --for=condition=Ready certificate/wildcard-tls --timeout=300s
+  register: cert_ready
+  ignore_errors: yes
+  tags: [cert-manager, cert]
+
+- name: Show certificate status
+  debug:
+    msg: >-
+      {{ 'Wildcard cert Ready: secret wildcard-tls in istio-ingress.'
+         if cert_ready.rc == 0 else
+         'Wildcard cert NOT Ready yet (DNS propagation / ACME delay). Check: kubectl -n istio-ingress describe certificate wildcard-tls. Re-run playbook to retry the wait.' }}
+  tags: [cert-manager, cert]

@@ -1,0 +1,288 @@
+# Shared Gateway (wildcard TLS) + ArgoCD VirtualService.
+# Wildcard cert secret `wildcard-tls` is created by cert-manager (DNS-01)
+# in the istio-ingress namespace before this applies.
+# Additional apps add their own VirtualService referencing main-gateway.
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: main-gateway
+  namespace: istio-ingress
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: wildcard-tls
+    hosts:
+    - "*.{{ domain }}"
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: argocd
+  namespace: argocd
+spec:
+  hosts:
+  - argocd.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    # Port 80: server runs --insecure (TLS terminates at Gateway; see
+    # argocd-cmd-params-cm patch below). Routing TLS-terminated traffic
+    # at the HTTPS-serving 443 loops http->https forever (ERROR 82).
+    - destination:
+        host: argocd-server.argocd.svc.cluster.local
+        port:
+          number: 80
+---
+# SonarQube lives outside the cluster (PC2 container). Same external-service
+# pattern as MinIO: ServiceEntry declares it, VirtualService routes to it.
+# SonarQube answer must stay a Tailscale-routable IP (not the PC2 bridge IP).
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: sonarqube-ext
+  namespace: istio-ingress
+spec:
+  hosts:
+  - sonarqube-ext.local
+  addresses:
+  - {{ sonarqube_ext_ip }}/32
+  ports:
+  - number: 9000
+    name: http
+    protocol: HTTP
+  location: MESH_EXTERNAL
+  resolution: STATIC
+  endpoints:
+  - address: {{ sonarqube_ext_ip }}
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: sonarqube
+  namespace: istio-ingress
+spec:
+  hosts:
+  - sonar.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: sonarqube-ext.local
+        port:
+          number: 9000
+---
+# Forgejo lives outside the cluster (PC2 container, TASK-262). Same
+# external-service pattern as SonarQube. Must stay a Tailscale-routable
+# IP (set forgejo_ext_ip after Tailscale is inside the VM).
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: forgejo-ext
+  namespace: istio-ingress
+spec:
+  hosts:
+  - forgejo-ext.local
+  addresses:
+  - {{ forgejo_ext_ip }}/32
+  ports:
+  - number: 3000
+    name: http
+    protocol: HTTP
+  location: MESH_EXTERNAL
+  resolution: STATIC
+  endpoints:
+  - address: {{ forgejo_ext_ip }}
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: forgejo
+  namespace: istio-ingress
+spec:
+  hosts:
+  - forgejo.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: forgejo-ext.local
+        port:
+          number: 3000
+---
+# Monitoring VM services (TASK: expose HTTP-only UIs via Gateway).
+# Same external-service pattern. OTel excluded deliberately (no UI).
+# Vault serves TLS itself -> DestinationRule originates HTTPS with
+# insecureSkipVerify (LAN hop; Vault's TLS still encrypts).
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: mon-ext
+  namespace: istio-ingress
+spec:
+  hosts:
+  - mon-ext.local
+  addresses:
+  - {{ mon_ext_ip }}/32
+  ports:
+  - number: 3000
+    name: grafana
+    protocol: HTTP
+  - number: 9090
+    name: prometheus
+    protocol: HTTP
+  - number: 9093
+    name: alertmanager
+    protocol: HTTP
+  - number: 16686
+    name: jaeger
+    protocol: HTTP
+  - number: 3100
+    name: loki
+    protocol: HTTP
+  location: MESH_EXTERNAL
+  resolution: STATIC
+  endpoints:
+  - address: {{ mon_ext_ip }}
+---
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: vault-ext
+  namespace: istio-ingress
+spec:
+  hosts:
+  - vault-ext.local
+  addresses:
+  - {{ vault_ext_ip }}/32
+  ports:
+  - number: 8200
+    name: https-vault
+    protocol: HTTPS
+  location: MESH_EXTERNAL
+  resolution: STATIC
+  endpoints:
+  - address: {{ vault_ext_ip }}
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: vault-ext
+  namespace: istio-ingress
+spec:
+  host: vault-ext.local
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: grafana
+  namespace: istio-ingress
+spec:
+  hosts:
+  - grafana.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: mon-ext.local
+        port:
+          number: 3000
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: prometheus
+  namespace: istio-ingress
+spec:
+  hosts:
+  - prometheus.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: mon-ext.local
+        port:
+          number: 9090
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: alertmanager
+  namespace: istio-ingress
+spec:
+  hosts:
+  - alertmanager.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: mon-ext.local
+        port:
+          number: 9093
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: jaeger
+  namespace: istio-ingress
+spec:
+  hosts:
+  - jaeger.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: mon-ext.local
+        port:
+          number: 16686
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: loki
+  namespace: istio-ingress
+spec:
+  hosts:
+  - loki.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: mon-ext.local
+        port:
+          number: 3100
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: vault
+  namespace: istio-ingress
+spec:
+  hosts:
+  - vault.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: vault-ext.local
+        port:
+          number: 8200

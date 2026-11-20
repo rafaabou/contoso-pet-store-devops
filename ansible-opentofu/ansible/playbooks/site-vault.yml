@@ -1,0 +1,11 @@
+---
+# ============================================
+# Playbook: Vault Server Setup
+# Run: ansible-playbook playbooks/site-vault.yml
+# ============================================
+
+- name: Install Vault on dedicated server
+  hosts: vault_server
+  become: true
+  roles:
+    - vault

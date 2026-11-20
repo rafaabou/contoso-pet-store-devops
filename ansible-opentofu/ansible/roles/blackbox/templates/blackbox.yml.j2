@@ -1,0 +1,41 @@
+---
+# Blackbox modules (TASK-263 step 2). Cert expiry is exported automatically
+# on every TLS probe (probe_ssl_earliest_cert_expiry) — no extra config.
+modules:
+  # Any serving answer counts (pages redirect to /login, /ui/, /graph).
+  tls_page:
+    prober: http
+    timeout: 10s
+    http:
+      valid_status_codes: [200, 301, 302, 307]
+      preferred_ip_protocol: ip4
+  # S3 API: anonymous / is denied by design (healthy = 403).
+  tls_s3:
+    prober: http
+    timeout: 10s
+    http:
+      valid_status_codes: [403]
+      preferred_ip_protocol: ip4
+  # Plain-HTTP native ports (mesh-independent view).
+  http_page:
+    prober: http
+    timeout: 10s
+    http:
+      valid_status_codes: [200, 301, 302, 307]
+      preferred_ip_protocol: ip4
+  # Self-signed TLS origins (Vault direct). LAN hop: encrypted, unverified.
+  https_insecure:
+    prober: http
+    timeout: 10s
+    http:
+      valid_status_codes: [200, 301, 302, 307]
+      preferred_ip_protocol: ip4
+      tls_config:
+        insecure_skip_verify: true
+  # Tailnet peer liveness (icmp). Needs CAP_NET_RAW on the service
+  # (blackbox user can't open raw sockets otherwise — silent 0s).
+  icmp_peer:
+    prober: icmp
+    timeout: 10s
+    icmp:
+      preferred_ip_protocol: ip4

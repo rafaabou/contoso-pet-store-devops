@@ -1,0 +1,164 @@
+# ============================================
+# Role: argocd
+# Install ArgoCD + GitOps
+# ============================================
+---
+- name: Create argocd namespace
+  shell: kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+  register: ns_created
+  changed_when: "'created' in ns_created.stdout"
+
+# Stretched cluster: taint the cross-PC worker so ALL subsequently scheduled
+# pods avoid it unless they tolerate the taint. PC1-local scheduling keeps
+# Gateway→pod and pod→API traffic off the flaky relay (same rule as istiod).
+# Existing pods are unaffected (NoSchedule); delete them after to reschedule.
+- name: Taint remote worker against general scheduling
+  command: kubectl taint nodes k3s-worker-2 dedicated=remote:NoSchedule --overwrite
+  changed_when: false
+  ignore_errors: yes
+
+# Upstream v2.12.5 manifests reference Secret argocd-redis (REDIS_PASSWORD)
+# in every workload but never create it → permanent CreateContainerConfigError.
+# Create-if-missing with a random password (stable across re-runs).
+- name: Check if argocd-redis secret exists
+  command: kubectl -n argocd get secret argocd-redis
+  register: redis_secret
+  changed_when: false
+  ignore_errors: yes
+
+- name: Create argocd-redis secret (once, random password)
+  shell: |
+    REDIS_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+    kubectl -n argocd create secret generic argocd-redis \
+      --from-literal=auth="$REDIS_PASS"
+  when: redis_secret.rc != 0
+
+- name: Install ArgoCD (pinned version)
+  command: "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml"
+
+# Bounce only pods stuck on the remote worker so the taint takes effect
+# (NoSchedule doesn't evict; replacements land PC1-local). No-op when empty.
+- name: Find ArgoCD pods on the remote worker
+  command: >
+    kubectl -n argocd get pods -o jsonpath='{range .items[?(@.spec.nodeName=="k3s-worker-2")]}{.metadata.name}{"\n"}{end}'
+  register: remote_pods
+  changed_when: false
+  ignore_errors: yes
+
+- name: Recycle remote pods onto PC1-local nodes
+  command: "kubectl -n argocd delete pod {{ remote_pods.stdout_lines | join(' ') }}"
+  when: remote_pods.stdout_lines | default([]) | length > 0
+
+- name: Wait for ArgoCD server rollout
+  command: >
+    kubectl --namespace argocd rollout status deployment/argocd-server
+    --timeout=300s
+
+# ArgoCD exposure is via Istio Gateway + VirtualService
+# (roles/istio/templates/gateway.yml.j2), not an nginx Ingress.
+# The istio role runs in site-networking.yml AFTER site-argocd.yml,
+# so on first full run ArgoCD has no external route until networking
+# completes — re-running site.yml (idempotent) converges everything.
+- name: Note ArgoCD exposure via Istio
+  debug:
+    msg: "ArgoCD external route comes from Istio Gateway (argocd.{{ domain }}). Ensure site-networking.yml runs after this."
+
+# Post-rotation the initial secret is (correctly) deleted — a hard get would
+# fail every converged run (ERROR 84). Check first, report either state.
+- name: Check if ArgoCD initial secret still exists
+  command: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}"
+  register: argocd_password
+  changed_when: false
+  # failed_when:false (not ignore_errors): rc is still captured for the branch
+  # below, but no scary ERROR block prints when the secret is correctly absent.
+  failed_when: false
+
+- name: Display ArgoCD credentials (save to Vault immediately)
+  debug:
+    msg: |
+      ArgoCD installed.
+      URL: https://argocd.{{ domain }}
+      Username: admin
+      {% if argocd_password.rc == 0 %}Initial password still present - run this to get it:
+        kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+      IMPORTANT: rotate in the UI, store in kv/argocd, then delete the initial secret.
+      {% else %}Initial secret absent: rotation already done (password lives in kv/argocd + Secret argocd-secret). Nothing to do.{% endif %}
+
+# --- SSO Phase 3 (Dex OIDC via Forgejo). Merge-patch preserves other
+# argocd-cm keys (never kubectl apply a full ConfigMap here). Dex reads the
+# config at boot -> rollout restart on change. Local admin untouched.
+- name: Read Vault init file (for ArgoCD SSO client)
+  slurp:
+    src: /root/vault-init.json
+  register: dex_vault_init_b64
+  delegate_to: "{{ groups['vault_server'][0] }}"
+  tags: [argocd, sso]
+
+- name: Parse Vault root token (Dex SSO)
+  set_fact:
+    dex_vault_token: "{{ (dex_vault_init_b64.content | b64decode | from_json).root_token }}"
+  no_log: true
+  tags: [argocd, sso]
+
+- name: Fetch ArgoCD SSO pair from Vault (kv/sso/argocd, KV v2)
+  uri:
+    url: "{{ vault_addr }}/v1/kv/data/sso/argocd"
+    headers:
+      X-Vault-Token: "{{ dex_vault_token }}"
+    validate_certs: no
+  register: dex_sso_kv
+  no_log: true
+  tags: [argocd, sso]
+
+- name: Set ArgoCD SSO facts
+  set_fact:
+    argocd_oidc_id: "{{ dex_sso_kv.json.data.data.client_id }}"
+    argocd_oidc_secret: "{{ dex_sso_kv.json.data.data.client_secret }}"
+  no_log: true
+  tags: [argocd, sso]
+
+- name: Render Dex merge-patch (mode 600 — holds client secret)
+  template:
+    src: dex-patch.json.j2
+    dest: /tmp/dex-patch.json
+    mode: '0600'
+  tags: [argocd, sso]
+
+- name: Merge Dex OIDC connector into argocd-cm
+  command: kubectl -n argocd patch configmap argocd-cm --type=merge --patch-file /tmp/dex-patch.json
+  register: dex_patch
+  changed_when: "'no change' not in dex_patch.stdout"
+  tags: [argocd, sso]
+
+- name: Restart Dex to pick up connector
+  command: kubectl -n argocd rollout restart deployment/argocd-dex-server
+  when: dex_patch is changed
+  tags: [argocd, sso]
+
+# argocd-server builds its dex proxy routes at BOOT from settings: patching
+# dex.config later leaves /api/dex/* 404ing until the server restarts too
+# (ERROR 106 — server pod predated the connector by 28h). Gate on the same
+# change so every future connector edit restarts both sides together.
+# DEEPER (ERROR 107): the server booted `url: ` EMPTY (boot line proves it)
+# though url sat in argocd-cmd-params-cm — v2.12.5 does not merge it into
+# settings. Empty URL fails IsDexConfigured first AND nils dex's generated
+# config (both daemons starved by one invisible string). Belt and suspenders:
+# url lives in argocd-cm directly (the map settings indisputably reads).
+- name: Set ArgoCD external URL in argocd-cm (cmd-params merge is unreliable)
+  command: >
+    kubectl -n argocd patch configmap argocd-cm --type=merge
+    -p '{"data":{"url":"https://argocd.{{ domain }}"}}'
+  register: url_patch
+  changed_when: "'no change' not in url_patch.stdout"
+  tags: [argocd, sso]
+
+- name: Restart ArgoCD server to pick up Dex routes
+  command: kubectl -n argocd rollout restart deployment/argocd-server
+  when: dex_patch is changed or url_patch is changed
+  tags: [argocd, sso]
+
+- name: Remove Dex patch file (secret on disk served its purpose)
+  file:
+    path: /tmp/dex-patch.json
+    state: absent
+  tags: [argocd, sso]

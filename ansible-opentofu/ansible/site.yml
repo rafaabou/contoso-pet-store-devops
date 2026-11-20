@@ -1,0 +1,72 @@
+# ============================================
+# Site Playbook — Master Orchestrator (Production)
+# Run: ansible-playbook site.yml
+# Or run individual playbooks from playbooks/ dir
+# ============================================
+---
+
+# Production: Run all playbooks in order.
+# Vault precedes networking: cert-manager reads the Cloudflare token from
+# Vault (kv/cloudflare) for DNS-01. Seed it once between the two on virgin
+# systems (role fails fast with instructions if missing).
+# For individual components, run from playbooks/ directory:
+#   ansible-playbook playbooks/site-cluster.yml
+#   ansible-playbook playbooks/site-nfs-server.yml
+#   ansible-playbook playbooks/site-nfs-client.yml
+#   ansible-playbook playbooks/site-node-exporter.yml
+#   ansible-playbook playbooks/site-tools.yml
+#   ansible-playbook playbooks/site-vault.yml
+#   ansible-playbook playbooks/site-networking.yml
+#   ansible-playbook playbooks/site-monitoring.yml
+#   ansible-playbook playbooks/site-opentelemetry.yml
+#   ansible-playbook playbooks/site-minio.yml
+#   ansible-playbook playbooks/site-sonarqube.yml
+#   ansible-playbook playbooks/site-argocd.yml
+#   ansible-playbook playbooks/site-apps.yml
+#   ansible-playbook playbooks/site-forgejo.yml
+#   ansible-playbook playbooks/site-security.yml
+
+# 1. K3s cluster (master + workers)
+- import_playbook: playbooks/site-cluster.yml
+
+# 2. NFS server on master (external HDD)
+- import_playbook: playbooks/site-nfs-server.yml
+
+# 3. NFS client on all other VMs
+- import_playbook: playbooks/site-nfs-client.yml
+
+# 4. Node exporter on K3s nodes (for Prometheus)
+- import_playbook: playbooks/site-node-exporter.yml
+
+# 5. Tools on master (kubectl, helm, k9s)
+- import_playbook: playbooks/site-tools.yml
+
+# 6. Vault server (dedicated VM) — BEFORE networking: cert-manager needs kv/cloudflare
+- import_playbook: playbooks/site-vault.yml
+
+# 7. Networking on K3s (MetalLB, cert-manager DNS-01, Istio Gateway)
+- import_playbook: playbooks/site-networking.yml
+
+# 8. Monitoring server (dedicated VM: Prometheus + Grafana)
+- import_playbook: playbooks/site-monitoring.yml
+
+# 9. OpenTelemetry (dedicated VM: OTel Collector + Jaeger + Loki)
+- import_playbook: playbooks/site-opentelemetry.yml
+
+# 10. MinIO S3 storage on master (NVMe)
+- import_playbook: playbooks/site-minio.yml
+
+# 11. SonarQube server (dedicated VM)
+- import_playbook: playbooks/site-sonarqube.yml
+
+# 12. ArgoCD on K3s (exposed via Istio Gateway, applied in networking)
+- import_playbook: playbooks/site-argocd.yml
+
+# 13. Applications (Store Front, Admin, microservices)
+- import_playbook: playbooks/site-apps.yml
+
+# 14. Forgejo CI (TASK-262: server + host-label runners, no Docker)
+- import_playbook: playbooks/site-forgejo.yml
+
+# 15. Security (RBAC, NetworkPolicies)
+- import_playbook: playbooks/site-security.yml

@@ -1,0 +1,74 @@
+---
+# ============================================
+# Role: blackbox (TASK-263 step 2)
+# Blackbox exporter on the monitoring VM (same LAN as every target:
+# no cross-PC paths, no Tailscale dependency for probes).
+# Probes: Gateway HTTPS names (TLS + cert expiry) + direct native ports
+# (mesh-independent fallback view). Prometheus scrapes :9115 (wired in
+# monitoring role template); rules in probe-rules.yml.
+# ============================================
+
+- name: Create blackbox user
+  ansible.builtin.user:
+    name: blackbox
+    shell: /bin/false
+    system: yes
+    create_home: no
+
+- name: Create blackbox directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: blackbox
+    group: blackbox
+    mode: "0755"
+  loop:
+    - /opt/blackbox
+    - /etc/blackbox
+
+- name: Download blackbox exporter (404 = bump blackbox_version)
+  ansible.builtin.get_url:
+    url: "https://github.com/prometheus/blackbox_exporter/releases/download/v{{ blackbox_version }}/blackbox_exporter-{{ blackbox_version }}.linux-amd64.tar.gz"
+    dest: /tmp/blackbox.tar.gz
+    mode: "0644"
+  register: blackbox_download
+
+- name: Extract blackbox exporter
+  ansible.builtin.unarchive:
+    src: /tmp/blackbox.tar.gz
+    dest: /tmp
+    remote_src: yes
+  when: blackbox_download.changed
+
+- name: Copy blackbox binary
+  ansible.builtin.copy:
+    src: "/tmp/blackbox_exporter-{{ blackbox_version }}.linux-amd64/blackbox_exporter"
+    dest: /usr/local/bin/blackbox_exporter
+    remote_src: yes
+    owner: blackbox
+    group: blackbox
+    mode: "0755"
+  when: blackbox_download.changed
+
+- name: Copy blackbox config
+  ansible.builtin.template:
+    src: blackbox.yml.j2
+    dest: /etc/blackbox/blackbox.yml
+    owner: blackbox
+    group: blackbox
+    mode: "0644"
+  notify: restart blackbox
+
+- name: Create blackbox systemd service
+  ansible.builtin.template:
+    src: blackbox.service.j2
+    dest: /etc/systemd/system/blackbox.service
+    mode: "0644"
+  notify: restart blackbox
+
+- name: Enable and start blackbox exporter
+  ansible.builtin.systemd:
+    name: blackbox
+    state: started
+    enabled: yes
+    daemon_reload: yes

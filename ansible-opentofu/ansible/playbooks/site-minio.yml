@@ -1,0 +1,11 @@
+---
+# ============================================
+# Playbook: MinIO S3 Storage Setup
+# Run: ansible-playbook playbooks/site-minio.yml
+# ============================================
+
+- name: Install MinIO on master
+  hosts: k3s_master
+  become: true
+  roles:
+    - minio

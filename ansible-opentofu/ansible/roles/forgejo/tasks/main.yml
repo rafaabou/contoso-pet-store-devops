@@ -1,0 +1,166 @@
+# ============================================
+# Role: forgejo (CI server, TASK-262)
+# Binary 16.0.3 + SQLite + systemd, no Docker anywhere.
+# Admin: random first-run password in /root/.forgejo-admin (0400).
+# Rotate in UI, store in kv/forgejo (established credential pattern).
+# ============================================
+---
+- name: Install Forgejo dependencies
+  apt:
+    name: [git, git-lfs, sqlite3, gnupg, curl]
+    state: present
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Create git system group (user module won't invent it — ERROR 89)
+  group:
+    name: git
+    system: yes
+
+- name: Create git system user
+  user:
+    name: git
+    system: yes
+    shell: /bin/bash
+    group: git
+    home: /home/git
+    create_home: yes
+
+- name: Create Forgejo directories
+  file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /var/lib/forgejo, owner: git, group: git, mode: '0750'}
+    - {path: /etc/forgejo, owner: root, group: git, mode: '0770'}
+
+- name: Check installed Forgejo version
+  command: /usr/local/bin/forgejo --version
+  register: forgejo_ver
+  changed_when: false
+  failed_when: false
+
+- name: Download Forgejo binary + signature
+  get_url:
+    url: "https://code.forgejo.org/forgejo/forgejo/releases/download/v{{ forgejo_version }}/{{ item }}"
+    dest: "/tmp/{{ item }}"
+    mode: '0644'
+  loop:
+    - "forgejo-{{ forgejo_version }}-linux-amd64"
+    - "forgejo-{{ forgejo_version }}-linux-amd64.asc"
+  when: forgejo_version not in (forgejo_ver.stdout | default(''))
+
+- name: Import Forgejo release key
+  command: gpg --keyserver hkps://keys.openpgp.org --recv EB114F5E6C0DC2BCDD183550A4B61A2DC5923710
+  when: forgejo_version not in (forgejo_ver.stdout | default(''))
+  changed_when: false
+
+- name: Verify GPG signature (fail fast, never skip silently)
+  command: gpg --verify /tmp/forgejo-{{ forgejo_version }}-linux-amd64.asc /tmp/forgejo-{{ forgejo_version }}-linux-amd64
+  when: forgejo_version not in (forgejo_ver.stdout | default(''))
+  changed_when: false
+
+- name: Install Forgejo binary
+  copy:
+    src: "/tmp/forgejo-{{ forgejo_version }}-linux-amd64"
+    dest: /usr/local/bin/forgejo
+    owner: root
+    group: root
+    mode: '0755'
+    remote_src: yes
+  when: forgejo_version not in (forgejo_ver.stdout | default(''))
+
+- name: Install systemd unit
+  get_url:
+    url: https://codeberg.org/forgejo/forgejo/raw/branch/forgejo/contrib/systemd/forgejo.service
+    dest: /etc/systemd/system/forgejo.service
+    mode: '0644'
+    force: no
+  register: forgejo_unit
+
+- name: Write app.ini (first install only, skips web installer)
+  template:
+    src: app.ini.j2
+    dest: /etc/forgejo/app.ini
+    owner: root
+    group: git
+    mode: '0770'
+    force: no
+
+- name: Reload systemd when unit is new
+  systemd:
+    daemon_reload: yes
+  when: forgejo_unit is changed
+
+- name: Enable and start Forgejo
+  systemd:
+    name: forgejo
+    enabled: yes
+    state: started
+
+- name: Wait for Forgejo web port
+  wait_for:
+    port: "{{ forgejo_http_port }}"
+    delay: 5
+    timeout: 120
+
+# Explicit modes: Jinja evaluates filters before ==, so a ternary here
+# silently mis-assigns bits (dir lost group-x -> git user can't stat config).
+# Dir 0750 (traverse) + file 0640 (read), both root:git. ERROR 91.
+- name: Lock Forgejo config dir (git group can traverse)
+  file:
+    path: /etc/forgejo
+    owner: root
+    group: git
+    mode: '0750'
+
+- name: Lock app.ini (git group can read)
+  file:
+    path: /etc/forgejo/app.ini
+    owner: root
+    group: git
+    mode: '0640'
+
+- name: Check if admin user exists
+  shell: |
+    export FORGEJO_WORK_DIR=/var/lib/forgejo
+    sudo -u git forgejo -c /etc/forgejo/app.ini admin user list 2>/dev/null | grep -q "{{ forgejo_admin_user }}"
+  register: forgejo_admin
+  changed_when: false
+  failed_when: false
+
+- name: Generate first-run admin password (once, root-only file)
+  shell: openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 20 > /root/.forgejo-admin && chmod 400 /root/.forgejo-admin
+  args:
+    creates: /root/.forgejo-admin
+
+- name: Create admin user (first run only)
+  shell: |
+    export FORGEJO_WORK_DIR=/var/lib/forgejo
+    sudo -u git forgejo -c /etc/forgejo/app.ini admin user create \
+      --admin --username "{{ forgejo_admin_user }}" --email admin@{{ domain }} \
+      --password "$(cat /root/.forgejo-admin)" --must-change-password=false
+  when: forgejo_admin.rc != 0
+
+# Server-minted registration tokens (ERROR 97): 5 rounds of UI copy-paste
+# produced wrong fields, stale tokens, hollow files. The CLI mints global
+# tokens (empty scope) with zero browser involvement; the runner role fetches
+# them machine-to-machine. Secrets never touch chat, clipboards, or my context.
+- name: Mint runner registration tokens (once each, server-side)
+  shell: |
+    export FORGEJO_WORK_DIR=/var/lib/forgejo
+    sudo -u git forgejo -c /etc/forgejo/app.ini forgejo-cli actions generate-runner-token > /root/.forgejo-runner-token-{{ item }}
+    chmod 400 /root/.forgejo-runner-token-{{ item }}
+  args:
+    creates: /root/.forgejo-runner-token-{{ item }}
+  loop: "{{ forgejo_managed_runner_labels }}"
+
+- name: Show Forgejo status (rotate password into Vault!)
+  debug:
+    msg: |
+      Forgejo {{ forgejo_version }} running on :{{ forgejo_http_port }} (SQLite).
+      URL (after Gateway exposure): https://forgejo.{{ domain }}
+      Admin: {{ forgejo_admin_user }} / password in /root/.forgejo-admin (rotate in UI, store kv/forgejo).

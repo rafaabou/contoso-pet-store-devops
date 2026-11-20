@@ -1,0 +1,91 @@
+# ============================================
+# Role: k3s-master
+# Install and configure k3s server
+# ============================================
+---
+
+# --- LXC prerequisites (shared role) ---
+- name: Apply LXC prerequisites
+  include_role:
+    name: lxc-prerequisites
+
+# --- Install k3s ---
+
+- name: Check if k3s is already installed
+  stat:
+    path: /usr/local/bin/k3s
+  register: k3s_installed
+
+- name: Install k3s server
+  shell: |
+    curl -sfL https://get.k3s.io | sh -s - \
+      --disable=traefik \
+      --node-ip={{ ansible_host }} \
+      --advertise-address={{ ansible_host }}
+  environment:
+    K3S_KUBECONFIG_MODE: "644"
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+  when: not k3s_installed.stat.exists
+
+# Cross-PC kubectl (and any Tailscale client) verifies the API server cert.
+# Default SANs cover only LAN/cluster IPs — add the Tailscale IP or x509
+# rejects it (worker-2). K3s regenerates serving certs on restart; the
+# cluster CA is untouched so agents keep working. If master's Tailscale IP
+# ever changes, update k3s_master_tailscale_ip and re-run (restart rotates).
+- name: Add Tailscale IP to API serving cert SANs
+  copy:
+    content: |
+      tls-san:
+        - "{{ k3s_master_tailscale_ip }}"
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: '0600'
+  notify: reload systemd and restart k3s
+  tags: [k3s, tls]
+
+- name: Remove modprobe ExecStartPre (fails in LXC, modules via host)
+  lineinfile:
+    path: /etc/systemd/system/k3s.service
+    regexp: '^ExecStartPre=.*modprobe.*$'
+    state: absent
+  notify: reload systemd and restart k3s
+  when: not k3s_installed.stat.exists
+
+- name: Wait for k3s to be ready
+  shell: k3s kubectl get nodes | grep -q "Ready"
+  register: result
+  until: result.rc == 0
+  retries: 30
+  delay: 10
+
+- name: Create .kube directory
+  file:
+    path: /root/.kube
+    state: directory
+    mode: '0700'
+
+- name: Copy kubeconfig
+  copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: /root/.kube/config
+    remote_src: yes
+    mode: '0600'
+
+- name: Update kubeconfig with correct IP
+  replace:
+    path: /root/.kube/config
+    regexp: '127.0.0.1'
+    replace: '{{ ansible_host }}'
+
+- name: Store token for workers
+  fetch:
+    src: /var/lib/rancher/k3s/server/node-token
+    dest: /tmp/k3s-node-token
+    flat: yes
+    mode: '0600'
+  when: inventory_hostname == groups['k3s_master'][0]
+
+- name: Clean up token file after workers join (manual step)
+  debug:
+    msg: "After all workers have joined, delete /tmp/k3s-node-token on the controller: rm -f /tmp/k3s-node-token"

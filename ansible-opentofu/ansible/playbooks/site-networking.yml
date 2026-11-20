@@ -1,0 +1,15 @@
+---
+# ============================================
+# Playbook: Networking (MetalLB + Cert-Manager + Istio)
+# Order matters: MetalLB provides .100 → cert-manager issues
+# wildcard cert via DNS-01 → Istio Gateway consumes the cert.
+# Run: ansible-playbook playbooks/site-networking.yml
+# ============================================
+
+- name: Install networking components
+  hosts: k3s_master
+  become: true
+  roles:
+    - metallb
+    - cert-manager
+    - istio

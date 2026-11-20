@@ -1,0 +1,6 @@
+---
+# istio defaults
+# Overridden by inventory/group_vars/all.yml
+istio_version: "1.30.4"
+istio_gateway_ip: "10.195.94.100"
+sonarqube_ext_ip: "100.73.135.124"

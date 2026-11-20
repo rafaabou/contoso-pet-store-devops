@@ -1,0 +1,24 @@
+# ============================================
+# Playbook: Forgejo CI (TASK-262)
+# Run: ansible-playbook playbooks/site-forgejo.yml
+# Order: server first (runners register against its URL).
+# Runner registration needs /root/.forgejo-runner-token on each
+# runner host (mint in Forgejo UI: Site Admin -> Actions -> Runners).
+# ============================================
+- name: Install Forgejo CI server
+  hosts: forgejo_server
+  become: true
+  roles:
+    - forgejo
+
+- name: Runner on Forgejo VM (ci-light label)
+  hosts: forgejo_server
+  become: true
+  roles:
+    - forgejo-runner
+
+- name: Dedicated heavy runners (ci-heavy label)
+  hosts: ci_runners
+  become: true
+  roles:
+    - forgejo-runner

@@ -1,0 +1,56 @@
+# ============================================
+# Role: nfs-server
+# Install NFS server on master (external HDD)
+# ============================================
+---
+- name: Install NFS server
+  apt:
+    name:
+      - nfs-kernel-server
+    state: present
+    update_cache: yes
+  tags: [nfs, packages]
+
+- name: Create NFS export directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: nobody
+    group: nogroup
+    mode: '0755'
+  loop:
+    - /srv/efs/shared
+    - /srv/efs/k3s-volumes
+    - /srv/efs/backups
+    - /srv/efs/logs
+  tags: [nfs, config]
+
+- name: Configure NFS exports (restricted to cluster subnet)
+  blockinfile:
+    path: /etc/exports
+    block: |
+      /srv/efs/shared 10.195.94.0/24(rw,sync,no_subtree_check,root_squash) 100.100.0.0/16(rw,sync,no_subtree_check,root_squash)
+      /srv/efs/k3s-volumes 10.195.94.0/24(rw,sync,no_subtree_check,root_squash) 100.100.0.0/16(rw,sync,no_subtree_check,root_squash)
+      /srv/efs/backups 10.195.94.0/24(rw,sync,no_subtree_check,root_squash) 100.100.0.0/16(rw,sync,no_subtree_check,root_squash)
+      /srv/efs/logs 10.195.94.0/24(rw,sync,no_subtree_check,root_squash) 100.100.0.0/16(rw,sync,no_subtree_check,root_squash)
+  notify: reload nfs exports
+  tags: [nfs, config]
+
+- name: Enable and start NFS server
+  systemd:
+    name: nfs-kernel-server
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  tags: [nfs, service]
+
+- name: Show NFS status
+  debug:
+    msg: |
+      NFS server running on {{ ansible_host }}.
+      Exports:
+      - /srv/efs/shared (general files)
+      - /srv/efs/k3s-volumes (Kubernetes PVCs)
+      - /srv/efs/backups (backups)
+      - /srv/efs/logs (centralized logs)
+  tags: [nfs, info]

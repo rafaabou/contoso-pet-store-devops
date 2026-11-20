@@ -1,0 +1,4 @@
+---
+- name: restart istiod
+  command: kubectl -n istio-system rollout restart deployment/istiod
+  changed_when: false

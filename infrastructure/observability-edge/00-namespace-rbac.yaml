@@ -1,0 +1,86 @@
+# ============================================
+# Observability edge (TASK-263 step 1): namespace + RBAC
+# Apply: kubectl apply -f 00-namespace-rbac.yaml
+# ============================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    istio-injection: disabled   # collectors must not carry sidecars (host paths + scrape loops)
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: monitoring
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+---
+# Alloy: read pods + logs + nodes + services/endpoints (scrape discovery)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alloy
+rules:
+- apiGroups: [""]
+  resources: [pods, pods/log, nodes, nodes/proxy, services, endpoints]
+  verbs: [get, list, watch]
+- apiGroups: [apps]
+  resources: [replicasets, statefulsets, daemonsets, deployments]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alloy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alloy
+subjects:
+- kind: ServiceAccount
+  name: alloy
+  namespace: monitoring
+---
+# KSM: canonical read-only view (trimmed to what dashboards/rules need)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-state-metrics
+rules:
+- apiGroups: [""]
+  resources: [configmaps, endpoints, limitranges, namespaces, nodes, persistentvolumeclaims, persistentvolumes, pods, replicationcontrollers, resourcequotas, services]
+  verbs: [get, list, watch]
+- apiGroups: [apps]
+  resources: [daemonsets, deployments, replicasets, statefulsets]
+  verbs: [get, list, watch]
+- apiGroups: [batch]
+  resources: [cronjobs, jobs]
+  verbs: [get, list, watch]
+- apiGroups: [autoscaling]
+  resources: [horizontalpodautoscalers]
+  verbs: [get, list, watch]
+- apiGroups: [policy]
+  resources: [poddisruptionbudgets]
+  verbs: [get, list, watch]
+- apiGroups: [admissionregistration.k8s.io]
+  resources: [mutatingwebhookconfigurations, validatingwebhookconfigurations]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+- kind: ServiceAccount
+  name: kube-state-metrics
+  namespace: monitoring

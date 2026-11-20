@@ -1,0 +1,87 @@
+## HashiCorp Vault Configuration
+## Using PostgreSQL as backend storage
+
+global:
+  enabled: true
+  tlsDisable: true  # Set to false in production with proper TLS
+
+injector:
+  enabled: true
+  replicas: 1
+  
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 250m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+server:
+  image:
+    repository: hashicorp/vault
+    tag: "1.7.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 500m
+    limits:
+      memory: 2Gi
+      cpu: 1000m
+
+  # Run in HA mode with 3 replicas
+  # ha:
+  #   enabled: true
+  #   replicas: 3
+  standalone:
+    enabled: true  
+    
+    # PostgreSQL backend configuration
+    config: |
+      ui = true
+      listener "tcp" {
+        tls_disable = 1
+        address = "0.0.0.0:8200"
+        cluster_address = "0.0.0.0:8201"
+      }
+      
+      storage "postgresql" {
+        connection_url = "postgres://vault:VaultPass123!@postgresql.platform.svc.cluster.local:5432/vault?sslmode=disable"
+        table = "vault_kv_store"
+      }
+      
+      # service_registration "kubernetes" {}
+
+  # Service configuration
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 8200
+    targetPort: 8200
+
+  # Disable data storage (not needed with PostgreSQL)
+  dataStorage:
+    enabled: false
+
+  # Audit logs storage
+  auditStorage:
+    enabled: true
+    size: 5Gi
+    storageClass: gp2
+    accessMode: ReadWriteOnce
+
+  # Standalone disabled (using HA)
+  ha:
+    enabled: false  
+
+  # Service account
+  serviceAccount:
+    create: true
+    name: vault
+
+ui:
+  enabled: true
+  serviceType: ClusterIP
+  externalPort: 8200

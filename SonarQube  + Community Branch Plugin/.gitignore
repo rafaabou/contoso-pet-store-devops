@@ -1,0 +1,19 @@
+# Local environment secrets — never commit
+.env
+
+# Export archives
+stack-configs-*.tar.gz
+
+# Runtime data — never export the DB or cert private keys to a public share
+# (note: acme.json IS exported on purpose by export-configs.sh for cert continuity)
+authelia/config/db.sqlite3
+
+# SFTP login details file contains a password
+docs/SFTP-Login.txt
+
+# Vault — rendered secrets, data, and AppRole credentials
+vault/rendered/
+vault/data/
+vault/agent/*-role-id
+vault/agent/*-secret-id
+vault/init-output.json

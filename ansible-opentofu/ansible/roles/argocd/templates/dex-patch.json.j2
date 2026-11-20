@@ -1,0 +1,1 @@
+{"data":{"dex.config":"connectors:\n- type: oidc\n  id: forgejo\n  name: Forgejo\n  config:\n    issuer: https://forgejo.{{ domain }}\n    clientID: {{ argocd_oidc_id }}\n    clientSecret: {{ argocd_oidc_secret }}\n    redirectURI: https://argocd.{{ domain }}/api/dex/callback\n    scopes:\n    - openid\n    - profile\n    - email\n"}}

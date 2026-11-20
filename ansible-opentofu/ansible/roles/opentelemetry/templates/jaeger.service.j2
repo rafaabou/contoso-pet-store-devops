@@ -1,0 +1,23 @@
+[Unit]
+Description=Jaeger All-in-One
+Documentation=https://www.jaegertracing.io/docs/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=jaeger
+Group=jaeger
+# Jaeger ≥1.62 enables a built-in OTLP receiver (:4317/:4318) by default,
+# which collides with the OTel Collector on this host (bind: address already
+# in use → restart loop). Disable it: the pipeline is apps → OTel (:4317)
+# → Jaeger via gRPC (:14250) → UI (:16686). Never co-locate two OTLP receivers.
+ExecStart=/usr/local/bin/jaeger-all-in-one \
+  --collector.zipkin.host-port=:9411 \
+  --collector.otlp.enabled=false
+Restart=always
+RestartSec=5
+Environment=SPAN_STORAGE_TYPE=memory
+
+[Install]
+WantedBy=multi-user.target

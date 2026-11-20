@@ -1,0 +1,43 @@
+# ============================================
+# Role: nfs-client
+# Mount NFS shares from master on all VMs
+# ============================================
+---
+- name: Install NFS client
+  apt:
+    name:
+      - nfs-common
+    state: present
+    update_cache: yes
+  tags: [nfs, packages]
+
+- name: Create NFS mount points
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /mnt/nfs/shared
+    - /mnt/nfs/k3s-volumes
+    - /mnt/nfs/backups
+    - /mnt/nfs/logs
+  tags: [nfs, config]
+
+# Per-host override (worker-2 on PC2 uses master's Tailscale IP)
+- name: Determine NFS server address
+  set_fact:
+    nfs_src: "{{ nfs_server_override | default(nfs_server_ip) }}"
+
+- name: Mount NFS shares
+  mount:
+    path: "/mnt/nfs/{{ item }}"
+    src: "{{ nfs_src }}:/srv/efs/{{ item }}"
+    fstype: nfs
+    opts: defaults
+    state: mounted
+  loop:
+    - shared
+    - k3s-volumes
+    - backups
+    - logs
+  tags: [nfs, mount]

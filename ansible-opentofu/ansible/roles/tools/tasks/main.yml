@@ -1,0 +1,30 @@
+# ============================================
+# Role: tools
+# Install kubectl, helm, k9s, stern, etc.
+# Uses install-k8s-tools.sh for latest versions
+# ============================================
+---
+- name: Copy tools installer script
+  copy:
+    src: install-k8s-tools.sh
+    dest: /tmp/install-k8s-tools.sh
+    mode: '0755'
+
+# NOTE: No 'creates' guard — k3s already ships a kubectl symlink which would
+# wrongly skip the whole script. install-k8s-tools.sh is idempotent
+# (check_tool skips each already-installed tool), so re-runs are safe.
+- name: Install Kubernetes tools
+  command: /tmp/install-k8s-tools.sh
+  register: tools_install
+  changed_when: "'installed' in tools_install.stdout"
+
+- name: Copy tools guide script to home directory
+  copy:
+    src: devopstools-guide.sh
+    dest: ~/devopstools-guide.sh
+    mode: '0755'
+
+- name: Clean up installer script
+  file:
+    path: /tmp/install-k8s-tools.sh
+    state: absent

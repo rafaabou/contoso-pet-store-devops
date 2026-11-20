@@ -1,0 +1,49 @@
+### Get ai service health
+GET /health
+Host: localhost:5001
+
+### Generate product description
+POST /generate/description 
+Host: localhost:5001
+Content-Type: application/json
+
+{
+    "name": "Seafarer's Tug Rope",
+    "tags": ["toy","dog"]
+}
+
+### Generate product image
+POST /generate/image 
+Host: localhost:5001
+Content-Type: application/json
+
+{
+    "name": "Seafarer's Tug Rope",
+    "description": "Engage your pup in a game of tug-of-war with the Seafarer's Tug Rope. Made from durable materials, this toy is perfect for interactive playtime and bonding with your furry friend.",
+    "price": 24.99
+}
+
+### Upload a local product photo instead of generating one (max 2 MB).
+### Replace ./toy.jpg with a real local image path before sending.
+POST /generate/image/upload
+Host: localhost:5001
+Content-Type: multipart/form-data; boundary=----uploadboundary
+
+------uploadboundary
+Content-Disposition: form-data; name="name"
+
+Seafarer's Tug Rope
+------uploadboundary
+Content-Disposition: form-data; name="description"
+
+Engage your pup in a game of tug-of-war with the Seafarer's Tug Rope.
+------uploadboundary
+Content-Disposition: form-data; name="price"
+
+24.99
+------uploadboundary
+Content-Disposition: form-data; name="file"; filename="toy.jpg"
+Content-Type: image/jpeg
+
+< ./toy.jpg
+------uploadboundary--

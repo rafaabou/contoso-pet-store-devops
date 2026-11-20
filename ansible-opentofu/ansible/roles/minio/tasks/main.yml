@@ -1,0 +1,159 @@
+# ============================================
+# Role: minio
+# Install MinIO S3-compatible object storage
+# ============================================
+---
+- name: Create minio user
+  user:
+    name: minio
+    shell: /bin/false
+    system: yes
+    create_home: no
+  tags: [minio, config]
+
+- name: Create minio directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: minio
+    group: minio
+    mode: '0755'
+  loop:
+    - /srv/s3-data
+    - /etc/minio
+  tags: [minio, config]
+
+- name: Download MinIO binary (pinned version)
+  get_url:
+    url: "https://dl.min.io/server/minio/release/linux-amd64/archive/minio.{{ minio_version }}"
+    dest: /usr/local/bin/minio
+    owner: root
+    group: root
+    mode: '0755'
+  tags: [minio, install]
+
+# --- MinIO credentials + SSO (Vault-sourced; group_vars root values retired) ---
+# Root pair lives in kv/minio (operator-created BEFORE first apply with this
+# role version — uri fails loud otherwise). OIDC pair from kv/sso/minio.
+# Claim mapping: Forgejo userinfo carries no groups, so preferred_username
+# maps to per-user policies (created in Console post-login; 2 humans, fine).
+
+- name: Read Vault init file (for MinIO secrets)
+  slurp:
+    src: /root/vault-init.json
+  register: minio_vault_init_b64
+  delegate_to: "{{ groups['vault_server'][0] }}"
+  tags: [minio, vault]
+
+- name: Parse Vault root token (MinIO)
+  set_fact:
+    minio_vault_token: "{{ (minio_vault_init_b64.content | b64decode | from_json).root_token }}"
+  no_log: true
+  tags: [minio, vault]
+
+- name: Fetch MinIO root pair from Vault (kv/minio)
+  uri:
+    url: "{{ vault_addr }}/v1/kv/data/minio"
+    headers:
+      X-Vault-Token: "{{ minio_vault_token }}"
+    validate_certs: no
+  register: minio_root_kv
+  no_log: true
+  tags: [minio, vault]
+
+- name: Fetch MinIO SSO pair from Vault (kv/sso/minio)
+  uri:
+    url: "{{ vault_addr }}/v1/kv/data/sso/minio"
+    headers:
+      X-Vault-Token: "{{ minio_vault_token }}"
+    validate_certs: no
+  register: minio_sso_kv
+  no_log: true
+  tags: [minio, vault]
+
+- name: Set MinIO secret facts
+  set_fact:
+    minio_root_user_vault: "{{ minio_root_kv.json.data.data.root_user }}"
+    minio_root_password_vault: "{{ minio_root_kv.json.data.data.root_password }}"
+    minio_oidc_id: "{{ minio_sso_kv.json.data.data.client_id }}"
+    minio_oidc_secret: "{{ minio_sso_kv.json.data.data.client_secret }}"
+  no_log: true
+  tags: [minio, vault]
+
+- name: Create MinIO systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=MinIO S3-compatible object storage
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      User=minio
+      Group=minio
+      ExecStart=/usr/local/bin/minio server /srv/s3-data --console-address ":9001" --address ":9000"
+      Restart=always
+      RestartSec=5
+      Environment=MINIO_ROOT_USER={{ minio_root_user_vault }}
+      Environment=MINIO_ROOT_PASSWORD={{ minio_root_password_vault }}
+      Environment=MINIO_IDENTITY_OPENID_CONFIG_URL=https://forgejo.{{ domain }}/.well-known/openid-configuration
+      Environment=MINIO_IDENTITY_OPENID_CLIENT_ID={{ minio_oidc_id }}
+      Environment=MINIO_IDENTITY_OPENID_CLIENT_SECRET={{ minio_oidc_secret }}
+      Environment=MINIO_IDENTITY_OPENID_CLAIM_NAME=preferred_username
+      Environment=MINIO_IDENTITY_OPENID_DISPLAY_NAME=Forgejo
+      Environment=MINIO_IDENTITY_OPENID_SCOPES=openid,profile,email
+      Environment=MINIO_IDENTITY_OPENID_REDIRECT_URI=https://minio.{{ domain }}/oauth_callback
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/minio.service
+    mode: '0600'
+  notify: restart minio
+  tags: [minio, config]
+
+- name: Enable and start MinIO
+  systemd:
+    name: minio
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  tags: [minio, service]
+
+- name: Wait for MinIO API to start
+  command: "curl -s -o /dev/null -w '%{http_code}' http://localhost:9000/minio/health/live"
+  register: minio_health
+  until: minio_health.stdout == "200"
+  retries: 15
+  delay: 5
+  ignore_errors: yes
+  tags: [minio, verify]
+
+- name: Show MinIO status
+  debug:
+    msg: |
+      MinIO S3-compatible storage running.
+      API: http://{{ ansible_host }}:9000
+      Console: http://{{ ansible_host }}:9001
+      Root credentials from Vault kv/minio (rotated, never in git).
+      SSO via Forgejo OIDC (claim preferred_username → per-user policies).
+  tags: [minio, info]
+
+# Exposure via Istio Gateway (no new DNS needed — wildcard covers it).
+# Applies cleanly before/after MinIO itself; 503 until the service is up.
+- name: Apply MinIO ServiceEntry + VirtualServices
+  template:
+    src: minio-gateway.yml.j2
+    dest: /tmp/minio-gateway.yml
+    mode: '0644'
+  tags: [minio, gateway]
+
+- name: Install MinIO gateway objects
+  command: kubectl apply -f /tmp/minio-gateway.yml
+  tags: [minio, gateway]
+
+- name: Show MinIO URLs
+  debug:
+    msg: |
+      MinIO console: https://minio.{{ domain }} (via Istio Gateway)
+      MinIO S3 API: https://s3.{{ domain }} (via Istio Gateway, use as S3 endpoint)
+  tags: [minio, info]

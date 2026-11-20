@@ -1,0 +1,272 @@
+---
+# ============================================
+# Role: monitoring
+# Install Prometheus + Grafana + Alertmanager
+# on dedicated monitoring VM (not K3s)
+# ============================================
+
+# --- Install Prometheus ---
+
+- name: Create prometheus user
+  ansible.builtin.user:
+    name: prometheus
+    shell: /bin/false
+    system: yes
+    create_home: no
+
+- name: Create prometheus directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: "0755"
+  loop:
+    - /opt/prometheus
+    - /opt/prometheus/data
+    - /etc/prometheus
+    - /etc/prometheus/rules
+
+- name: Download Prometheus
+  ansible.builtin.get_url:
+    url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+    dest: /tmp/prometheus.tar.gz
+    mode: "0644"
+  register: prometheus_download
+
+- name: Extract Prometheus
+  ansible.builtin.unarchive:
+    src: /tmp/prometheus.tar.gz
+    dest: /tmp
+    remote_src: yes
+  when: prometheus_download.changed
+
+- name: Copy Prometheus binaries
+  ansible.builtin.copy:
+    src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    remote_src: yes
+    owner: prometheus
+    group: prometheus
+    mode: "0755"
+  loop:
+    - prometheus
+    - promtool
+  when: prometheus_download.changed
+
+- name: Copy Prometheus config
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/prometheus/prometheus.yml
+    owner: prometheus
+    group: prometheus
+    mode: "0644"
+  notify: restart prometheus
+
+- name: Copy probe alert rules (blackbox DomainDown + cert expiry)
+  ansible.builtin.template:
+    src: probe-rules.yml.j2
+    dest: /etc/prometheus/rules/probe-rules.yml
+    owner: prometheus
+    group: prometheus
+    mode: "0644"
+  notify: restart prometheus
+
+- name: Create Prometheus systemd service
+  ansible.builtin.template:
+    src: prometheus.service.j2
+    dest: /etc/systemd/system/prometheus.service
+    mode: "0644"
+  notify: restart prometheus
+
+- name: Enable and start Prometheus
+  ansible.builtin.systemd:
+    name: prometheus
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+# --- Install Grafana ---
+
+- name: Install Grafana dependencies
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - software-properties-common
+    state: present
+    update_cache: yes
+
+# apt.grafana.com serves an ASCII-armored key; signed-by needs the
+# dearmored (binary) keyring or apt reports NO_PUBKEY (same pattern as vault role).
+- name: Remove wrongly-armored Grafana keyring (from older runs)
+  shell: grep -q "BEGIN PGP" /usr/share/keyrings/grafana-archive-keyring.gpg && rm -f /usr/share/keyrings/grafana-archive-keyring.gpg || true
+  args:
+    removes: /usr/share/keyrings/grafana-archive-keyring.gpg
+  ignore_errors: yes
+
+- name: Add Grafana GPG key (dearmored)
+  shell: curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /usr/share/keyrings/grafana-archive-keyring.gpg
+  args:
+    creates: /usr/share/keyrings/grafana-archive-keyring.gpg
+
+- name: Add Grafana APT repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/grafana-archive-keyring.gpg] https://apt.grafana.com stable main"
+    state: present
+    filename: grafana
+
+- name: Install Grafana
+  ansible.builtin.apt:
+    name: grafana
+    state: present
+    update_cache: yes
+
+# --- Grafana SSO client (TASK-264 Phase 2, same Vault idiom as Telegram) ---
+# Facts must exist BEFORE the config template renders (hence here, not later).
+
+- name: Read Vault init file (for Grafana SSO client)
+  ansible.builtin.slurp:
+    src: /root/vault-init.json
+  register: sso_vault_init_b64
+  delegate_to: "{{ groups['vault_server'][0] }}"
+  tags: [monitoring, vault]
+
+- name: Parse Vault root token (SSO)
+  ansible.builtin.set_fact:
+    sso_vault_token: "{{ (sso_vault_init_b64.content | b64decode | from_json).root_token }}"
+  no_log: true
+  tags: [monitoring, vault]
+
+- name: Fetch Grafana SSO pair from Vault (kv/sso/grafana, KV v2)
+  ansible.builtin.uri:
+    url: "{{ vault_addr }}/v1/kv/data/sso/grafana"
+    headers:
+      X-Vault-Token: "{{ sso_vault_token }}"
+    validate_certs: no
+  register: sso_grafana_kv
+  no_log: true
+  tags: [monitoring, vault]
+
+- name: Set Grafana SSO facts
+  ansible.builtin.set_fact:
+    grafana_oauth_id: "{{ sso_grafana_kv.json.data.data.client_id }}"
+    grafana_oauth_secret: "{{ sso_grafana_kv.json.data.data.client_secret }}"
+  no_log: true
+  tags: [monitoring, vault]
+
+- name: Copy Grafana config
+  ansible.builtin.template:
+    src: grafana.ini.j2
+    dest: /etc/grafana/grafana.ini
+    owner: grafana
+    group: grafana
+    mode: "0640"
+  notify: restart grafana
+
+- name: Enable and start Grafana
+  ansible.builtin.systemd:
+    name: grafana-server
+    state: started
+    enabled: yes
+
+# --- Install Alertmanager ---
+
+- name: Create alertmanager user
+  ansible.builtin.user:
+    name: alertmanager
+    shell: /bin/false
+    system: yes
+    create_home: no
+
+- name: Create alertmanager directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: alertmanager
+    group: alertmanager
+    mode: "0755"
+  loop:
+    - /opt/alertmanager
+    - /opt/alertmanager/data
+    - /etc/alertmanager
+
+- name: Download Alertmanager
+  ansible.builtin.get_url:
+    url: "https://github.com/prometheus/alertmanager/releases/download/v{{ alertmanager_version }}/alertmanager-{{ alertmanager_version }}.linux-amd64.tar.gz"
+    dest: /tmp/alertmanager.tar.gz
+    mode: "0644"
+  register: alertmanager_download
+
+- name: Extract Alertmanager
+  ansible.builtin.unarchive:
+    src: /tmp/alertmanager.tar.gz
+    dest: /tmp
+    remote_src: yes
+  when: alertmanager_download.changed
+
+- name: Copy Alertmanager binary
+  ansible.builtin.copy:
+    src: "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64/alertmanager"
+    dest: /usr/local/bin/alertmanager
+    remote_src: yes
+    owner: alertmanager
+    group: alertmanager
+    mode: "0755"
+  when: alertmanager_download.changed
+
+# --- Alertmanager Telegram receiver (TASK-263 step 3, secrets from Vault) ---
+# Same delegate_to pattern as cert-manager role. no_log everywhere: token
+# must never reach logs. Fails loud if kv/alertmanager missing (run step 0).
+
+- name: Read Vault init file (for Alertmanager Telegram secrets)
+  ansible.builtin.slurp:
+    src: /root/vault-init.json
+  register: am_vault_init_b64
+  delegate_to: "{{ groups['vault_server'][0] }}"
+  tags: [monitoring, vault]
+
+- name: Parse Vault root token
+  ansible.builtin.set_fact:
+    am_vault_token: "{{ (am_vault_init_b64.content | b64decode | from_json).root_token }}"
+  no_log: true
+  tags: [monitoring, vault]
+
+- name: Fetch Telegram secrets from Vault (kv/alertmanager, KV v2)
+  ansible.builtin.uri:
+    url: "{{ vault_addr }}/v1/kv/data/alertmanager"
+    headers:
+      X-Vault-Token: "{{ am_vault_token }}"
+    validate_certs: no
+  register: am_vault_kv
+  no_log: true
+  tags: [monitoring, vault]
+
+- name: Set Alertmanager Telegram facts
+  ansible.builtin.set_fact:
+    alertmanager_bot_token: "{{ am_vault_kv.json.data.data.telegram_bot_token }}"
+    alertmanager_chat_id: "{{ am_vault_kv.json.data.data.telegram_chat_id }}"
+  no_log: true
+  tags: [monitoring, vault]
+
+- name: Copy Alertmanager config
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: /etc/alertmanager/alertmanager.yml
+    owner: alertmanager
+    group: alertmanager
+    mode: "0644"
+  notify: restart alertmanager
+
+- name: Create Alertmanager systemd service
+  ansible.builtin.template:
+    src: alertmanager.service.j2
+    dest: /etc/systemd/system/alertmanager.service
+    mode: "0644"
+  notify: restart alertmanager
+
+- name: Enable and start Alertmanager
+  ansible.builtin.systemd:
+    name: alertmanager
+    state: started
+    enabled: yes
+    daemon_reload: yes

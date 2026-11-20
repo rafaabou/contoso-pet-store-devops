@@ -1,0 +1,135 @@
+# ServiceAccount for Vault
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: vault
+  labels:
+    app.kubernetes.io/name: vault
+
+---
+# Vault configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: vault
+data:
+  vault.hcl: |
+    ui = true
+
+    listener "tcp" {
+      tls_disable = 1
+      address = "0.0.0.0:8200"
+      cluster_address = "0.0.0.0:8201"
+    }
+
+    storage "postgresql" {
+      connection_url = "postgres://vault:PostgresAdmin123!@postgresql.platform.svc.cluster.local:5432/vaultdb?sslmode=disable"
+      table = "vault_store"
+      max_parallel = 128
+    }
+
+    disable_mlock = true
+
+---
+# Headless service for StatefulSet (internal communication)
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-internal
+  namespace: vault
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: vault
+  ports:
+    - name: api
+      port: 8200
+      targetPort: 8200
+    - name: cluster
+      port: 8201
+      targetPort: 8201
+  publishNotReadyAddresses: true
+
+---
+# ClusterIP service for in-cluster clients
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: vault
+spec:
+  selector:
+    app.kubernetes.io/name: vault
+  ports:
+    - name: api
+      port: 8200
+      targetPort: 8200
+    - name: cluster
+      port: 8201
+      targetPort: 8201
+
+---
+# StatefulSet running Vault
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+  namespace: vault
+spec:
+  serviceName: vault-internal
+  replicas: 1   # Start with 1; increase if HA needed
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vault
+    spec:
+      serviceAccountName: vault
+      containers:
+      - name: vault
+        image: hashicorp/vault:1.18.1
+        args:
+          - "server"
+          - "-config=/vault/config/vault.hcl"
+        env:
+          - name: VAULT_ADDR
+            value: "http://127.0.0.1:8200"
+          - name: SKIP_CHOWN
+            value: "true"
+          - name: SKIP_SETCAP
+            value: "true"    
+          - name: VAULT_API_ADDR
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+        ports:
+          - containerPort: 8200
+            name: api
+          - containerPort: 8201
+            name: cluster
+        readinessProbe:
+          httpGet:
+            path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+            port: 8200
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /v1/sys/health?standbyok=true
+            port: 8200
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        volumeMounts:
+          - name: config
+            mountPath: /vault/config
+      volumes:
+        - name: config
+          configMap:
+            name: vault-config
+            items:
+              - key: vault.hcl
+                path: vault.hcl

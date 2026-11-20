@@ -1,0 +1,92 @@
+# ============================================
+# Role: k3s-worker
+# Install k3s agent and join cluster
+# ============================================
+---
+
+# --- LXC prerequisites (shared role) ---
+- name: Apply LXC prerequisites
+  include_role:
+    name: lxc-prerequisites
+
+# --- Install k3s agent ---
+
+- name: Check if k3s is already installed
+  stat:
+    path: /usr/local/bin/k3s
+  register: k3s_installed
+
+- name: Read master token
+  set_fact:
+    k3s_token: "{{ lookup('file', '/tmp/k3s-node-token') }}"
+  when: not k3s_installed.stat.exists
+
+- name: Determine K3s server URL (Tailscale for cross-network workers)
+  set_fact:
+    k3s_url: "{{ k3s_server_url | default('https://' + hostvars[groups['k3s_master'][0]]['ansible_host'] + ':6443') }}"
+  when: not k3s_installed.stat.exists
+
+- name: Install k3s agent (via K3S_URL env forces agent mode)
+  shell: |
+    curl -sfL https://get.k3s.io | sh -s - \
+      --node-ip={{ ansible_host }}
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    K3S_URL: "{{ k3s_url }}"
+    K3S_TOKEN: "{{ k3s_token }}"
+  when: not k3s_installed.stat.exists
+
+- name: Remove modprobe ExecStartPre (fails in LXC, modules via host)
+  lineinfile:
+    path: /etc/systemd/system/k3s-agent.service
+    regexp: '^ExecStartPre=.*modprobe.*$'
+    state: absent
+  notify: reload systemd
+  when: not k3s_installed.stat.exists
+
+- name: Wait for node to register with master
+  shell: |
+    k3s kubectl get nodes | grep "{{ inventory_hostname }}" | grep -q "Ready"
+  delegate_to: "{{ groups['k3s_master'][0] }}"
+  register: result
+  until: result.rc == 0
+  retries: 30
+  delay: 10
+
+# Agents ship no kubeconfig → kubectl defaults to localhost:8080 (refused).
+# Distribute master's admin config with a per-worker server URL (Tailscale
+# for cross-PC workers via k3s_server_url, LAN IP otherwise). Runs always:
+# pre-existing workers never received one.
+- name: Determine K3s server URL for kubeconfig
+  set_fact:
+    kubeconfig_url: "{{ k3s_server_url | default('https://' + hostvars[groups['k3s_master'][0]]['ansible_host'] + ':6443') }}"
+
+- name: Read master admin kubeconfig
+  slurp:
+    src: /etc/rancher/k3s/k3s.yaml
+  register: master_kubeconfig_b64
+  delegate_to: "{{ groups['k3s_master'][0] }}"
+
+# k3s-agent (unlike the server install) creates neither dir — the copy
+# task fails on the missing destination without these.
+- name: Ensure kube config dirs exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - /root/.kube
+    - /etc/rancher/k3s
+
+- name: Install worker kubeconfig (server URL rewritten)
+  copy:
+    content: "{{ master_kubeconfig_b64.content | b64decode | regex_replace('server: https?://[^\\s]+', 'server: ' + kubeconfig_url) }}"
+    dest: "{{ item }}"
+    owner: root
+    group: root
+    mode: '0600'
+  loop:
+    - /etc/rancher/k3s/k3s.yaml
+    - /root/.kube/config

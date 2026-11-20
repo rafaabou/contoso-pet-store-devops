@@ -1,0 +1,186 @@
+# ============================================
+# Role: forgejo-runner (TASK-262)
+# Binary runner + Buildah, host-exec labels (no Docker, no Podman).
+# Registration token: mint in Forgejo UI (Site Admin -> Actions ->
+# Runners -> Create token), place at /root/.forgejo-runner-token (0400).
+# Role registers once (guard: /home/runner/.runner), then idles.
+# ============================================
+---
+- name: Install runner dependencies (git + daemonless builder + json tools)
+  apt:
+    name: [git, buildah, curl, jq]
+    state: present
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Create runner user
+  user:
+    name: runner
+    shell: /bin/bash
+    home: /home/runner
+    create_home: yes
+
+- name: Check installed runner version
+  command: /usr/local/bin/forgejo-runner -v
+  register: runner_ver
+  changed_when: false
+  failed_when: false
+
+# pipefail: without it a dead curl still exits 0 via cut, yielding an empty
+# version that silently skips every downstream task (ERROR 93). Fail loud.
+- name: Resolve runner version (latest unless pinned)
+  shell: |
+    set -o pipefail
+    if [ "{{ forgejo_runner_version }}" = "latest" ]; then
+      curl -fsSL 'https://data.forgejo.org/api/v1/repos/forgejo/runner/releases/latest' | jq -r .name | cut -c 2-
+    else
+      echo "{{ forgejo_runner_version }}"
+    fi
+  args:
+    executable: /bin/bash
+  register: runner_resolved
+  changed_when: false
+  failed_when: runner_resolved.stdout | length == 0
+  when: "'forgejo-runner version' not in (runner_ver.stdout | default(''))"
+
+- name: Download runner binary + signature
+  get_url:
+    url: "https://code.forgejo.org/forgejo/runner/releases/download/v{{ runner_resolved.stdout }}/{{ item }}"
+    dest: "/tmp/{{ item }}"
+    mode: '0644'
+  loop:
+    - "forgejo-runner-{{ runner_resolved.stdout }}-linux-amd64"
+    - "forgejo-runner-{{ runner_resolved.stdout }}-linux-amd64.asc"
+  when: runner_resolved.stdout | default('') | length > 0
+
+- name: Import Forgejo release key
+  command: gpg --keyserver hkps://keys.openpgp.org --recv EB114F5E6C0DC2BCDD183550A4B61A2DC5923710
+  when: runner_resolved.stdout | default('') | length > 0
+  changed_when: false
+
+- name: Verify runner GPG signature (fail fast)
+  command: gpg --verify /tmp/forgejo-runner-{{ runner_resolved.stdout }}-linux-amd64.asc /tmp/forgejo-runner-{{ runner_resolved.stdout }}-linux-amd64
+  when: runner_resolved.stdout | default('') | length > 0
+  changed_when: false
+
+- name: Install runner binary
+  copy:
+    src: "/tmp/forgejo-runner-{{ runner_resolved.stdout }}-linux-amd64"
+    dest: /usr/local/bin/forgejo-runner
+    owner: root
+    group: root
+    mode: '0755'
+    remote_src: yes
+  when: runner_resolved.stdout | default('') | length > 0
+
+- name: Check registration state
+  stat:
+    path: /home/runner/.runner
+  register: runner_reg
+
+- name: Generate default runner config (once)
+  shell: forgejo-runner generate-config > /home/runner/runner-config.yml
+  args:
+    creates: /home/runner/runner-config.yml
+  become_user: runner
+
+- name: Set runner capacity
+  lineinfile:
+    path: /home/runner/runner-config.yml
+    regexp: '^(\s*)capacity:'
+    line: '\1capacity: {{ forgejo_runner_capacity }}'
+    backrefs: yes
+  become_user: runner
+
+# Prefer server-minted tokens (ERROR 97) over hand-pasted ones: fetch from
+# the Forgejo host into the local root-only file. Overwrites dead pastes when
+# unregistered (self-healing); leaves registered runners completely alone.
+# no_log: token value must never reach logs.
+- name: Fetch server-minted token (machine-to-machine)
+  slurp:
+    src: /root/.forgejo-runner-token-{{ forgejo_runner_label_name }}
+  delegate_to: "{{ groups['forgejo_server'][0] }}"
+  register: minted_token
+  ignore_errors: yes
+  no_log: true
+  when: not runner_reg.stat.exists
+
+- name: Write fetched token locally (root-only)
+  copy:
+    content: "{{ minted_token.content | b64decode }}"
+    dest: /root/.forgejo-runner-token
+    owner: root
+    group: root
+    mode: '0400'
+  no_log: true
+  when:
+    - not runner_reg.stat.exists
+    - minted_token is defined
+    - not (minted_token.skipped | default(false))
+    - not (minted_token.failed | default(false))
+
+- name: Check for registration token (server-minted preferred, UI fallback)
+  stat:
+    path: /root/.forgejo-runner-token
+  register: runner_token
+
+# Token lands root-only in /root (0700 dir: runner can't even traverse).
+# Stage a runner-owned copy; original stays untouched. ERROR 94.
+- name: Stage token where runner user can read it
+  copy:
+    src: /root/.forgejo-runner-token
+    dest: /home/runner/.runner-token
+    owner: runner
+    group: runner
+    mode: '0400'
+    remote_src: yes
+  when: runner_token.stat.exists
+
+# A later aborted cat> re-hollows the source AFTER verification; staging then
+# faithfully copies emptiness and the binary dies cryptically (ERROR 96).
+# This gate dies plainly instead — before the binary ever runs.
+- name: Refuse to register with an empty token (fail loud)
+  command: test -s /home/runner/.runner-token
+  become_user: runner
+  changed_when: false
+  when: runner_token.stat.exists
+
+- name: Register runner (skips cleanly until token exists)
+  shell: |
+    forgejo-runner register --no-interactive --config /home/runner/runner-config.yml \
+      --instance "{{ forgejo_runner_instance }}" \
+      --token "$(cat /home/runner/.runner-token)" \
+      --name "{{ inventory_hostname }}-{{ forgejo_runner_label_name }}" \
+      --labels "{{ forgejo_runner_labels }}"
+  args:
+    chdir: /home/runner
+  become_user: runner
+  when: not runner_reg.stat.exists and runner_token.stat.exists
+
+- name: Note missing token (first run only, not a failure)
+  debug:
+    msg: "Runner binary + config ready. Mint a token in Forgejo UI (Site Admin -> Actions -> Runners), place at /root/.forgejo-runner-token (0400), re-run this playbook to register."
+  when: not runner_reg.stat.exists and not runner_token.stat.exists
+
+- name: Install runner systemd unit
+  get_url:
+    url: https://code.forgejo.org/forgejo/runner/raw/branch/main/contrib/forgejo-runner.service
+    dest: /etc/systemd/system/forgejo-runner.service
+    mode: '0644'
+    force: no
+  register: runner_unit
+
+- name: Reload systemd when unit is new
+  systemd:
+    daemon_reload: yes
+  when: runner_unit is changed
+
+- name: Enable and start runner
+  systemd:
+    name: forgejo-runner
+    enabled: yes
+    state: started
+
+- name: Show runner status
+  debug:
+    msg: "Runner '{{ inventory_hostname }}-{{ forgejo_runner_label_name }}' ({{ forgejo_runner_labels }}, capacity {{ forgejo_runner_capacity }}) -> https://forgejo.{{ domain }}. Check idle state in Forgejo admin panel."

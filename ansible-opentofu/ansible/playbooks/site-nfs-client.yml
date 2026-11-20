@@ -1,0 +1,14 @@
+---
+# ============================================
+# Playbook: NFS Client Setup
+# Run: ansible-playbook playbooks/site-nfs-client.yml
+# ============================================
+
+# NOTE: Only K3s workers use NFS mounts (privileged containers).
+# vault/monitoring/sonarqube are unprivileged (can't NFS mount: Operation not permitted)
+# so they get /srv/efs/* via Incus disk devices (see opentofu/pc1/main.tf).
+- name: Mount NFS shares on K3s workers only
+  hosts: k3s_workers
+  become: true
+  roles:
+    - nfs-client

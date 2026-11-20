@@ -1,0 +1,166 @@
+# ============================================
+# Alloy edge collector (TASK-263 step 1)
+# DaemonSet on EVERY node (incl. worker-2): endpoints are Tailscale IPs,
+# reachable from all nodes via host tailscale0 (no affinity hacks).
+# Replace 100.67.95.124 after Tailscale lands on the monitoring VM,
+# then (re-)apply. Until then pipelines fail loudly (expected, two-pass
+# onboarding — same pattern as sonarqube/forgejo Tailscale).
+# Apply: kubectl apply -f 10-alloy.yaml
+# Rollback: kubectl delete -f 10-alloy.yaml (center stack untouched)
+# ============================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: monitoring
+data:
+  config.alloy: |
+    // Node-scoped discovery (ERROR 100): this stretched cluster cannot
+    // tail/scrape pods across PCs (worker-2 kubelet unreachable from PC1
+    // API proxy path). Every Alloy tails+scrapes ONLY its own node.
+    discovery.relabel "localpods" {
+      targets = discovery.kubernetes.pods.targets
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_node_name"]
+        regex         = sys.env("NODE_NAME")
+        action        = "keep"
+      }
+    }
+
+    // ---- LOGS: pod stdout (Pino JSON) -> sanitize -> Loki ----
+    loki.source.kubernetes "pods" {
+      targets = discovery.relabel.localpods.output
+      forward_to = [loki.process.sanitize.receiver]
+    }
+
+    loki.process "sanitize" {
+      // Stream identity = source defaults (namespace/pod/container).
+      // NEVER add user IDs, paths, trace IDs as labels (cardinality death);
+      // allowlist later via stage.labeldrop additions (stage.label_allow
+      // does NOT exist — ERROR 98).
+      stage.static_labels {
+        values = { cluster = "homelab" }
+      }
+      // PII scrub BEFORE storage (production rule): emails + bearer tokens.
+      stage.replace {
+        expression = "(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}"
+        replace    = "***EMAIL***"
+      }
+      stage.replace {
+        expression = "(?i)bearer\\s+[a-z0-9._~+/-]+=*"
+        replace    = "bearer ***REDACTED***"
+      }
+      forward_to = [loki.write.center.receiver]
+    }
+
+    loki.write "center" {
+      endpoint {
+        url = "http://100.67.95.124:3100/loki/api/v1/push"
+      }
+    }
+
+    // ---- METRICS: KSM + self + annotated pods -> VM Prometheus ----
+    prometheus.scrape "ksm" {
+      targets = [{ "__address__" = "kube-state-metrics.monitoring.svc.cluster.local:8080" }]
+      forward_to = [prometheus.remote_write.center.receiver]
+      scrape_interval = "30s"
+    }
+
+    prometheus.scrape "self" {
+      targets = [{ "__address__" = "127.0.0.1:12345" }]
+      forward_to = [prometheus.remote_write.center.receiver]
+      scrape_interval = "30s"
+    }
+
+    // Future apps opt in with annotation prometheus.io/scrape=true (zero cost idle)
+    discovery.kubernetes "pods" {
+      role = "pod"
+    }
+    prometheus.scrape "annotated" {
+      targets = discovery.relabel.localpods.output
+      forward_to = [prometheus.remote_write.center.receiver]
+      scrape_interval = "30s"
+    }
+
+    prometheus.remote_write "center" {
+      endpoint {
+        url = "http://100.67.95.124:9090/api/v1/write"
+      }
+    }
+
+    // ---- TRACES/OTLP: pass-through to VM collector (Jaeger behind it) ----
+    otelcol.receiver.otlp "edge" {
+      grpc { endpoint = "0.0.0.0:4317" }
+      http { endpoint = "0.0.0.0:4318" }
+      output {
+        metrics = [otelcol.exporter.otlp.center.input]
+        logs    = [otelcol.exporter.otlp.center.input]
+        traces  = [otelcol.exporter.otlp.center.input]
+      }
+    }
+
+    otelcol.exporter.otlp "center" {
+      client {
+        endpoint = "100.67.95.124:4318"
+        tls { insecure = true }   // LAN/tailnet hop; mTLS STRICT phase later
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: alloy
+  namespace: monitoring
+  labels:
+    app: alloy
+spec:
+  selector:
+    matchLabels:
+      app: alloy
+  template:
+    metadata:
+      labels:
+        app: alloy
+    spec:
+      serviceAccountName: alloy
+      # Run everywhere, even on tainted nodes (collectors observe, don't serve)
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: alloy
+        # Pin verified: bump after checking latest (grafana/alloy releases)
+        image: grafana/alloy:v1.5.1
+        args: ["run", "/etc/alloy/config.alloy", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy"]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - containerPort: 4317
+          name: otlp-grpc
+        - containerPort: 4318
+          name: otlp-http
+        - containerPort: 12345
+          name: ui
+        resources:
+          requests: {memory: "128Mi", cpu: "100m"}
+          limits: {memory: "512Mi", cpu: "500m"}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/alloy
+        - name: podlogs
+          mountPath: /var/log/pods
+          readOnly: true
+        - name: data
+          mountPath: /var/lib/alloy
+      volumes:
+      - name: config
+        configMap:
+          name: alloy-config
+      - name: podlogs
+        hostPath:
+          path: /var/log/pods
+      - name: data
+        emptyDir: {}

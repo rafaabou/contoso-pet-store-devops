@@ -1,0 +1,21 @@
+---
+# ============================================
+# Playbook: Security (RBAC + NetworkPolicies)
+# Run: ansible-playbook playbooks/site-security.yml
+# ============================================
+
+- name: Configure cluster security
+  hosts: k3s_master
+  become: true
+  tasks:
+    - name: Create RBAC roles
+      debug:
+        msg: "RBAC configuration will be applied here"
+
+    - name: Create NetworkPolicies
+      debug:
+        msg: "NetworkPolicies will be applied here"
+
+    - name: Configure PodSecurityStandards
+      debug:
+        msg: "PodSecurityStandards will be configured here"

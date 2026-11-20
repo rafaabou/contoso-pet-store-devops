@@ -1,0 +1,23 @@
+---
+# ============================================
+# Playbook: K3s Cluster Setup
+# Run: ansible-playbook playbooks/site-cluster.yml
+# ============================================
+
+- name: Configure all cluster nodes
+  hosts: k3s_cluster
+  become: true
+  roles:
+    - common
+
+- name: Install k3s master
+  hosts: k3s_master
+  become: true
+  roles:
+    - k3s-master
+
+- name: Install k3s workers
+  hosts: k3s_workers
+  become: true
+  roles:
+    - k3s-worker

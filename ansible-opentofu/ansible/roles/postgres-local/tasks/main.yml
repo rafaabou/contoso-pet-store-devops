@@ -1,0 +1,72 @@
+# ============================================
+# Role: postgres-local
+# Install PostgreSQL on dedicated partition
+# ============================================
+---
+- name: Install PostgreSQL
+  apt:
+    name:
+      - postgresql
+      - postgresql-contrib
+    state: present
+    update_cache: yes
+  tags: [postgres, packages]
+
+- name: Create PostgreSQL data directory
+  file:
+    path: /srv/rds-data
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0700'
+  tags: [postgres, config]
+
+- name: Check if data already moved
+  stat:
+    path: /srv/rds-data/postgresql
+  register: pg_data_moved
+  tags: [postgres, config]
+
+- name: Move PostgreSQL data to dedicated partition
+  block:
+    - name: Stop PostgreSQL
+      systemd:
+        name: postgresql
+        state: stopped
+
+    - name: Move data directory
+      command:
+        cmd: mv /var/lib/postgresql /srv/rds-data/postgresql
+        creates: /srv/rds-data/postgresql
+
+    - name: Create symlink
+      file:
+        src: /srv/rds-data/postgresql
+        dest: /var/lib/postgresql
+        state: link
+
+    - name: Fix ownership
+      file:
+        path: /srv/rds-data/postgresql
+        owner: postgres
+        group: postgres
+        recurse: yes
+  rescue:
+    - name: Ensure PostgreSQL is running (rollback)
+      systemd:
+        name: postgresql
+        state: started
+      ignore_errors: yes
+
+    - name: Fail with clear message
+      fail:
+        msg: "PostgreSQL data move failed. PostgreSQL restarted with original data. Check disk space and permissions."
+  when: not pg_data_moved.stat.exists
+  tags: [postgres, config]
+
+- name: Enable and start PostgreSQL
+  systemd:
+    name: postgresql
+    state: started
+    enabled: yes
+  tags: [postgres, service]

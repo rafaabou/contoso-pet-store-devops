@@ -1,0 +1,55 @@
+---
+# Probe alerts (TASK-263 step 2). Firing state visible in Prometheus/Grafana
+# immediately; paging arrives in step 3 (Telegram receiver). Every alert links
+# its ERROR entry — no alert without a runbook.
+groups:
+- name: blackbox-probes
+  interval: 60s
+  rules:
+  # Prometheus annotations use double-brace dollar syntax, which collides
+  # with Jinja delimiters — raw blocks pass them through untouched (ERROR 101).
+  # NOTE: even YAML # comments are parsed by Jinja first, so no braces here either.
+  - alert: DomainDown
+    expr: probe_success == 0
+    for: 3m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Probe failing: {% raw %}{{ $labels.instance }}{% endraw %}"
+      runbook: "troubleshooting/networking/ — Gateway route? backend alive? (s3 403-anon excluded by module)"
+
+  - alert: TailscalePeerDown
+    expr: probe_success{job="blackbox-icmp"} == 0
+    for: 3m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Tailnet peer unreachable: {% raw %}{{ $labels.instance }}{% endraw %}"
+      runbook: "tailscale status both PCs — WiFi link? (2026-09-10 SPOF) kill-switch? then per-host tailscaled restart"
+
+  - alert: NodeDown
+    expr: up{job=~"k3s-master|k3s-worker-1|k3s-worker-2|prometheus"} == 0
+    for: 3m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Scrape target dead (host/container down?): {% raw %}{{ $labels.instance }}{% endraw %}"
+      runbook: "incus list on owning PC — container Running? host reachable? (covers dead hosts regardless of cause)"
+
+  - alert: CertExpiringSoon
+    expr: (probe_ssl_earliest_cert_expiry - time()) < 21 * 86400 and probe_ssl_earliest_cert_expiry - time() > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "TLS cert expires within 21d: {% raw %}{{ $labels.instance }}{% endraw %}"
+      runbook: "cert-manager DNS-01 renewal (Vault kv/cloudflare must be unsealed+readable)"
+
+  - alert: CertExpiringCritical
+    expr: (probe_ssl_earliest_cert_expiry - time()) < 7 * 86400 and probe_ssl_earliest_cert_expiry - time() > 0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: "TLS cert expires within 7d: {% raw %}{{ $labels.instance }}{% endraw %}"
+      runbook: "same as CertExpiringSoon, drop everything else first"

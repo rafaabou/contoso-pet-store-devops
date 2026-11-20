@@ -1,0 +1,13 @@
+---
+# ============================================
+# Playbook: OpenTelemetry Stack Setup
+# Install OTel Collector + Jaeger + Loki
+# on dedicated monitoring VM
+# Run: ansible-playbook playbooks/site-opentelemetry.yml
+# ============================================
+
+- name: Install OpenTelemetry stack on dedicated server
+  hosts: monitoring_server
+  become: true
+  roles:
+    - opentelemetry

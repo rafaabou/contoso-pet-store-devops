@@ -1,0 +1,53 @@
+# Grafana configuration
+# Docs: https://grafana.com/docs/grafana/latest/administration/configuration/
+
+instance_name = {{ inventory_hostname }}
+
+[server]
+protocol = http
+http_port = {{ grafana_port }}
+domain = {{ domain }}
+# Callback correctness lives here: OAuth redirect must be the public HTTPS
+# name or the handshake dies with redirect_uri_mismatch (SSO error S-3).
+root_url = https://grafana.{{ domain }}/
+
+[database]
+type = sqlite3
+
+[security]
+admin_user = admin
+admin_password = {{ grafana_password }}
+
+[auth.anonymous]
+enabled = false
+
+# SSO Phase 2 (TASK-264 in plan): Forgejo OIDC. Local admin stays (break-glass).
+# Default mapped role is Viewer; admins keep using local login until group
+# mapping lands (later phase). Disable block to roll back.
+[auth.generic_oauth]
+enabled = true
+name = Forgejo
+# Provider-level signup gate (v13 docs-verified): ONLY this controls OAuth
+# account creation — the global [users] setting does NOT cascade (ERROR 105).
+allow_sign_up = true
+client_id = {{ grafana_oauth_id }}
+client_secret = {{ grafana_oauth_secret }}
+scopes = openid profile email
+auth_url = https://forgejo.{{ domain }}/login/oauth/authorize
+token_url = https://forgejo.{{ domain }}/login/oauth/access_token
+api_url = https://forgejo.{{ domain }}/api/v1/user
+
+[users]
+# OAuth first login auto-provisions the account: allow_sign_up MUST be true
+# or every first SSO login dies with signup-disabled (ERROR 105). New users
+# land as Viewer (read-only dashboards); admins keep local login. The local
+# signup form appearing is accepted (LAN-only service).
+allow_sign_up = true
+auto_assign_org = true
+auto_assign_org_role = Viewer
+
+[log]
+mode = console
+
+[unified_alerting]
+enabled = true

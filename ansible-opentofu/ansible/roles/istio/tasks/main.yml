@@ -1,0 +1,192 @@
+# ============================================
+# Role: istio
+# Install Istio service mesh (base + istiod + ingress gateway)
+# via upstream Helm charts (pinned version in group_vars).
+# Replaces nginx-ingress: Gateway API handles north-south,
+# sidecars handle east-west (mTLS, canary, telemetry).
+# ============================================
+---
+- name: Add Istio Helm repo
+  command: helm repo add istio https://istio-release.storage.googleapis.com/charts
+  changed_when: false
+  ignore_errors: yes
+  tags: [istio, repo]
+
+# Per-release idempotency: each helm release checked independently, so a
+# half-finished first run (base ok, istiod failed) converges on re-run.
+- name: Check installed Istio releases
+  command: helm list -n istio-system -q
+  register: istio_installed
+  changed_when: false
+  ignore_errors: yes
+  tags: [istio, install]
+
+- name: Update Helm repos (only if installing)
+  command: helm repo update
+  changed_when: false
+  when: "'istio-base' not in istio_installed.stdout or 'istiod' not in istio_installed.stdout"
+  tags: [istio, repo]
+
+- name: Create istio-system namespace
+  shell: kubectl create namespace istio-system --dry-run=client -o yaml | kubectl apply -f -
+  register: istio_ns
+  changed_when: "'created' in istio_ns.stdout"
+  tags: [istio, install]
+
+- name: Install istio-base (CRDs + cluster resources)
+  command: >
+    helm install istio-base istio/base
+    --version {{ istio_version }}
+    -n istio-system
+  when: "'istio-base' not in istio_installed.stdout"
+  tags: [istio, install]
+
+# NOTE: no 'k3s' profile exists in the istiod chart (profiles: default,
+# demo, minimal, remote, empty). K3s is conformant — default profile works.
+# Small-node tuning: k3s kubelet reserves ~2GB of a 4GB node (allocatable
+# ~1.77GB); stock istiod requests 2Gi and never schedules. 512Mi is ample
+# for a lab mesh (istiod idles ~200-400MB).
+- name: Install istiod (control plane)
+  command: >
+    helm install istiod istio/istiod
+    --version {{ istio_version }}
+    -n istio-system
+    --set pilot.env.PILOT_ENABLE_PROTOCOL_SNIFFING_FOR_OUTBOUND=false
+    --set pilot.resources.requests.cpu=250m
+    --set pilot.resources.requests.memory=512Mi
+  when: "'istiod' not in istio_installed.stdout"
+  tags: [istio, install]
+
+# Stretched cluster: worker-2 sits across a flaky Tailscale relay and
+# cross-PC pod networking (flannel VXLAN) is unreliable there. Pin
+# control-plane + gateway pods to the PC1-local master so ingress and
+# mesh control never depend on the inter-PC link. (Durable fix for
+# worker-2 pod networking = flannel-iface=tailscale0 cluster-wide, separate op.)
+- name: Pin istiod to k3s-master
+  command: >
+    kubectl -n istio-system patch deployment istiod --type=merge
+    -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"k3s-master"}}}}}'
+  register: istiod_pin
+  changed_when: "'no change' not in istiod_pin.stdout"
+  ignore_errors: yes
+  tags: [istio, install]
+
+# rollout status (not kubectl wait on pod selector): the selector matches
+# dying pods from the previous ReplicaSet too, and one never-Ready stale
+# pod poisons the whole wait. Rollout tracks the deployment itself.
+- name: Wait for istiod rollout
+  command: >
+    kubectl --namespace istio-system rollout status deployment/istiod
+    --timeout=300s
+  changed_when: false
+  tags: [istio, install]
+
+- name: Create istio-ingress namespace
+  shell: kubectl create namespace istio-ingress --dry-run=client -o yaml | kubectl apply -f -
+  register: ingress_ns
+  changed_when: "'created' in ingress_ns.stdout"
+  tags: [istio, gateway]
+
+- name: Check if ingress gateway is installed
+  command: helm list -n istio-ingress -q
+  register: gateway_installed
+  changed_when: false
+  ignore_errors: yes
+  tags: [istio, gateway]
+
+- name: Install istio-ingressgateway (pinned MetalLB IP)
+  command: >
+    helm install istio-ingressgateway istio/gateway
+    --version {{ istio_version }}
+    -n istio-ingress
+    --set service.loadBalancerIP={{ istio_gateway_ip }}
+    --set service.type=LoadBalancer
+  when: "'istio-ingressgateway' not in gateway_installed.stdout"
+  tags: [istio, gateway]
+
+- name: Pin ingress gateway to k3s-master (same stretched-cluster reason)
+  command: >
+    kubectl -n istio-ingress patch deployment istio-ingressgateway --type=merge
+    -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"k3s-master"}}}}}'
+  register: gateway_pin
+  changed_when: "'no change' not in gateway_pin.stdout"
+  ignore_errors: yes
+  tags: [istio, gateway]
+
+- name: Wait for ingress gateway rollout (gets MetalLB IP)
+  command: >
+    kubectl --namespace istio-ingress rollout status deployment/istio-ingressgateway
+    --timeout=300s
+  changed_when: false
+  tags: [istio, gateway]
+
+- name: Verify gateway claimed pinned IP
+  command: >
+    kubectl -n istio-ingress get svc istio-ingressgateway
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+  register: gateway_ip
+  changed_when: false
+  tags: [istio, gateway]
+
+- name: Assert gateway IP matches pin
+  assert:
+    that: gateway_ip.stdout == istio_gateway_ip
+    fail_msg: "Gateway got {{ gateway_ip.stdout }}, expected {{ istio_gateway_ip }}. Fix MetalLB pool or loadBalancerIP."
+  tags: [istio, gateway]
+
+- name: Ensure argocd namespace exists (for its VirtualService)
+  shell: kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+  register: argocd_ns
+  changed_when: "'created' in argocd_ns.stdout"
+  tags: [istio, config]
+
+- name: Apply main Gateway (wildcard TLS)
+  template:
+    src: gateway.yml.j2
+    dest: /tmp/istio-gateway.yml
+    mode: '0644'
+  tags: [istio, config]
+
+- name: Install main Gateway + ArgoCD VirtualService
+  command: kubectl apply -f /tmp/istio-gateway.yml
+  tags: [istio, config]
+
+# ArgoCD behind a TLS-terminating Gateway must serve plain HTTP itself,
+# else it redirects http->https per request into an infinite loop (the
+# Gateway keeps forwarding). Merge-patch preserves existing params keys.
+- name: Set ArgoCD server insecure mode + external URL
+  command: >
+    kubectl -n argocd patch configmap argocd-cmd-params-cm --type=merge
+    -p '{"data":{"server.insecure":"true","url":"https://argocd.{{ domain }}"}}'
+  register: argocd_params
+  changed_when: "'no change' not in argocd_params.stdout"
+  ignore_errors: yes
+  tags: [istio, config]
+
+- name: Restart ArgoCD server to pick up params
+  command: kubectl -n argocd rollout restart deployment/argocd-server
+  when: argocd_params is changed
+  tags: [istio, config]
+
+- name: Apply mesh-wide PERMISSIVE PeerAuthentication
+  shell: |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: security.istio.io/v1beta1
+    kind: PeerAuthentication
+    metadata:
+      name: default
+      namespace: istio-system
+    spec:
+      mtls:
+        mode: PERMISSIVE
+    EOF
+  tags: [istio, mtls]
+
+- name: Show Istio status
+  debug:
+    msg: |
+      Istio {{ istio_version }} installed (sidecar mode, PERMISSIVE mTLS).
+      Gateway IP: {{ gateway_ip.stdout }} (wildcard *.{{ domain }} routes here)
+      Next: label app namespaces with istio-injection=enabled as services deploy.
+      Tighten to STRICT later: kubectl apply PeerAuthentication mode STRICT (verify scrapes/traces first).
+  tags: [istio, info]

@@ -1,0 +1,19 @@
+[Unit]
+Description=Blackbox Exporter (domain + cert probes)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=blackbox
+Group=blackbox
+# ICMP prober needs raw sockets (unprivileged user + no caps = all ping probes 0)
+AmbientCapabilities=CAP_NET_RAW
+ExecStart=/usr/local/bin/blackbox_exporter \
+  --config.file=/etc/blackbox/blackbox.yml \
+  --web.listen-address=:9115
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

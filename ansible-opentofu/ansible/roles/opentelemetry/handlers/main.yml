@@ -1,0 +1,18 @@
+---
+- name: restart otelcol
+  ansible.builtin.systemd:
+    name: otelcol
+    state: restarted
+    daemon_reload: yes
+
+- name: restart jaeger
+  ansible.builtin.systemd:
+    name: jaeger
+    state: restarted
+    daemon_reload: yes
+
+- name: restart loki
+  ansible.builtin.systemd:
+    name: loki
+    state: restarted
+    daemon_reload: yes

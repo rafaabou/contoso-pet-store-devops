@@ -1,0 +1,6 @@
+---
+# minio defaults
+# Overridden by inventory/group_vars/all.yml
+minio_version: "RELEASE.2024-12-13T22-19-12Z"
+minio_root_user: "minioadmin"
+minio_root_password: *******

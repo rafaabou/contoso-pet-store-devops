@@ -1,0 +1,74 @@
+# ============================================
+# Role: lxc-prerequisites
+# Shared LXC container fixes for K3s
+# (dev-kmsg symlink + /proc/sys remount)
+# Used by k3s-master and k3s-worker roles
+# ============================================
+---
+- name: Check if /dev/kmsg exists
+  stat:
+    path: /dev/kmsg
+  register: dev_kmsg
+  tags: [lxc, kmsg]
+
+- name: Create /dev/kmsg symlink
+  file:
+    src: /dev/console
+    dest: /dev/kmsg
+    state: link
+  when: not dev_kmsg.stat.exists
+  tags: [lxc, kmsg]
+
+- name: Create dev-kmsg systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=Symlink /dev/kmsg to /dev/console
+      DefaultDependencies=no
+      Before=local-fs.target
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/ln -sf /dev/console /dev/kmsg
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=sysinit.target
+    dest: /etc/systemd/system/dev-kmsg.service
+    mode: '0644'
+  tags: [lxc, kmsg]
+
+- name: Enable dev-kmsg service
+  systemd:
+    name: dev-kmsg.service
+    enabled: yes
+    daemon_reload: yes
+  tags: [lxc, kmsg]
+
+- name: Remount /proc/sys as read-write
+  command: mount -o remount,rw /proc/sys
+  changed_when: false
+  tags: [lxc, proc-sys]
+
+- name: Create proc-sys-rw systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=Remount /proc/sys read-write for kubelet
+      DefaultDependencies=no
+      Before=k3s.service k3s-agent.service
+      After=local-fs.target
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/mount -o remount,rw /proc/sys
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/proc-sys-rw.service
+    mode: '0644'
+  tags: [lxc, proc-sys]
+
+- name: Enable proc-sys-rw service
+  systemd:
+    name: proc-sys-rw.service
+    enabled: yes
+    daemon_reload: yes
+  tags: [lxc, proc-sys]

@@ -1,0 +1,299 @@
+# ============================================
+# Role: vault
+# Install HashiCorp Vault (Production Mode)
+# ============================================
+---
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  tags: [vault, packages]
+
+- name: Install dependencies
+  apt:
+    name:
+      - gnupg
+      - software-properties-common
+      - curl
+      - unzip
+      - jq
+    state: present
+  tags: [vault, packages]
+
+# Upstream rotated signing keys (old 798A… → current FC9CA9…, ERROR 103):
+# a creates-guarded download never refreshes a stale-but-present keyring.
+- name: Check HashiCorp keyring holds current signing key
+  shell: gpg --show-keys /usr/share/keyrings/hashicorp-archive-keyring.gpg 2>/dev/null | grep -q FC9CA96ACA026560
+  register: hc_key
+  changed_when: false
+  failed_when: false
+  tags: [vault, packages]
+
+- name: Remove stale HashiCorp keyring (wrong key id blocks the repo)
+  file:
+    path: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+    state: absent
+  when: hc_key.rc != 0
+  tags: [vault, packages]
+
+- name: Add HashiCorp GPG key
+  shell: curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+  args:
+    creates: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+  tags: [vault, packages]
+
+- name: Add HashiCorp repository
+  shell: echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list
+  args:
+    creates: /etc/apt/sources.list.d/hashicorp.list
+  tags: [vault, packages]
+
+- name: Install Vault
+  apt:
+    name: vault
+    state: present
+    update_cache: yes
+  tags: [vault, packages]
+
+- name: Create Vault configuration directory
+  file:
+    path: /etc/vault.d
+    state: directory
+    owner: vault
+    group: vault
+    mode: '0755'
+  tags: [vault, config]
+
+- name: Create Vault data directory
+  file:
+    path: /opt/vault/data
+    state: directory
+    owner: vault
+    group: vault
+    mode: '0755'
+  tags: [vault, config]
+
+- name: Generate self-signed TLS certificate
+  shell: |
+    openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+      -keyout /etc/vault.d/vault.key -out /etc/vault.d/vault.crt \
+      -subj "/CN={{ ansible_host }}" \
+      -addext "subjectAltName=IP:{{ ansible_host }},DNS:{{ inventory_hostname }}"
+    chown vault:vault /etc/vault.d/vault.key /etc/vault.d/vault.crt
+    chmod 0600 /etc/vault.d/vault.key
+    chmod 0644 /etc/vault.d/vault.crt
+  args:
+    creates: /etc/vault.d/vault.crt
+  tags: [vault, tls]
+
+- name: Create Vault configuration
+  template:
+    src: vault.hcl.j2
+    dest: /etc/vault.d/vault.hcl
+    owner: vault
+    group: vault
+    mode: '0644'
+  notify: restart vault
+  tags: [vault, config]
+
+- name: Enable and start Vault service
+  systemd:
+    name: vault
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  tags: [vault, service]
+
+# Sealed (rc=2) is a first-class state, not a failure: the unseal task below
+# handles it. failed_when:false (not until-semantics, not ignore_errors, both
+# of which misfire here — ERROR 86) so the play always reaches the branch.
+- name: Wait for Vault API to respond
+  command: vault status -format=json
+  environment:
+    VAULT_ADDR: "https://127.0.0.1:8200"
+    VAULT_SKIP_VERIFY: "true"
+  register: vault_status
+  until: vault_status.rc == 0 or vault_status.rc == 2
+  retries: 30
+  delay: 10
+  failed_when: false
+  changed_when: false
+  tags: [vault, config]
+
+- name: Fail only if the API itself is down (rc not in 0/2)
+  fail:
+    msg: "Vault API not responding (rc={{ vault_status.rc }}). Check TLS cert + service, not seal state."
+  when: vault_status.rc != 0 and vault_status.rc != 2
+  tags: [vault, config]
+
+- name: Initialize Vault (first run only)
+  shell: |
+    vault operator init -key-shares=1 -key-threshold=1 -format=json > /root/vault-init.json
+    chmod 0600 /root/vault-init.json
+  environment:
+    VAULT_ADDR: "https://127.0.0.1:8200"
+    VAULT_SKIP_VERIFY: "true"
+  args:
+    creates: /root/vault-init.json
+  when: vault_status.rc == 2 or (vault_status.stdout is defined and '"initialized":false' in vault_status.stdout)
+  tags: [vault, init]
+
+- name: Unseal Vault
+  shell: |
+    UNSEAL_KEY=$(jq -r '.unseal_keys_b64[0]' /root/vault-init.json)
+    vault operator unseal "$UNSEAL_KEY"
+  environment:
+    VAULT_ADDR: "https://127.0.0.1:8200"
+    VAULT_SKIP_VERIFY: "true"
+  when: vault_status.rc == 2
+  tags: [vault, unseal]
+
+- name: Check final Vault status
+  command: vault status -format=json
+  environment:
+    VAULT_ADDR: "https://127.0.0.1:8200"
+    VAULT_SKIP_VERIFY: "true"
+  register: vault_final
+  changed_when: false
+  ignore_errors: yes
+  tags: [vault, config]
+
+- name: Show Vault status
+  debug:
+    msg: |
+      Vault installed with TLS.
+      UI: https://{{ ansible_host }}:8200/ui
+      Status: {{ 'Unsealed and ready' if vault_final.rc == 0 else ('Sealed' if vault_final.rc == 2 else 'Not initialized') }}
+      Init keys: /root/vault-init.json (KEEP SAFE!)
+  tags: [vault, info]
+
+# Vault re-seals on every restart/reboot, possibly AFTER the earlier status
+# check (e.g. config handler restart). Re-verify seal state fresh right
+# before privileged ops — stale vault_status must not be trusted here.
+- name: Re-check Vault seal status (fresh)
+  command: vault status -format=json
+  environment:
+    VAULT_ADDR: "https://127.0.0.1:8200"
+    VAULT_SKIP_VERIFY: "true"
+  register: vault_seal_fresh
+  changed_when: false
+  ignore_errors: yes
+  tags: [vault, kv]
+
+- name: Unseal Vault if re-sealed since earlier check
+  shell: |
+    UNSEAL_KEY=$(jq -r '.unseal_keys_b64[0]' /root/vault-init.json)
+    vault operator unseal "$UNSEAL_KEY"
+  environment:
+    VAULT_ADDR: "https://127.0.0.1:8200"
+    VAULT_SKIP_VERIFY: "true"
+  when: vault_seal_fresh.rc == 2
+  tags: [vault, kv]
+
+- name: Check if KV v2 engine enabled at kv/
+  shell: |
+    export VAULT_ADDR="https://127.0.0.1:8200" VAULT_SKIP_VERIFY="true"
+    export VAULT_TOKEN=$(jq -r .root_token /root/vault-init.json)
+    vault secrets list -format=json | jq -e '."kv/"'
+  register: kv_check
+  changed_when: false
+  failed_when: false
+  tags: [vault, kv]
+
+- name: Enable KV v2 secrets engine at kv/
+  shell: |
+    export VAULT_ADDR="https://127.0.0.1:8200" VAULT_SKIP_VERIFY="true"
+    export VAULT_TOKEN=$(jq -r .root_token /root/vault-init.json)
+    vault secrets enable -path=kv kv-v2
+  when: kv_check.rc != 0
+  tags: [vault, kv]
+
+# --- SSO Phase 5 (Vault OIDC last, highest lockout stakes go last) ---
+# Token auth stays forever as fallback; test with a root shell open.
+# Secrets self-reference kv/sso/vault (already in Vault — nothing new typed).
+# Idempotent via existence guards; rotation = delete role + re-run (noted).
+# Role carries the `default` policy only (proves login; real policy mapping
+# per team is follow-up work, not this phase).
+
+- name: Check OIDC auth method mounted
+  shell: |
+    export VAULT_ADDR="https://127.0.0.1:8200" VAULT_SKIP_VERIFY="true"
+    export VAULT_TOKEN=$(jq -r .root_token /root/vault-init.json)
+    vault auth list -format=json | jq -e '."oidc/"'
+  register: oidc_check
+  changed_when: false
+  failed_when: false
+  tags: [vault, sso]
+
+- name: Enable OIDC auth method
+  shell: |
+    export VAULT_ADDR="https://127.0.0.1:8200" VAULT_SKIP_VERIFY="true"
+    export VAULT_TOKEN=$(jq -r .root_token /root/vault-init.json)
+    vault auth enable oidc
+  when: oidc_check.rc != 0
+  tags: [vault, sso]
+
+- name: Check OIDC default role exists
+  shell: |
+    export VAULT_ADDR="https://127.0.0.1:8200" VAULT_SKIP_VERIFY="true"
+    export VAULT_TOKEN=$(jq -r .root_token /root/vault-init.json)
+    vault read auth/oidc/role/default >/dev/null
+  register: oidc_role_check
+  changed_when: false
+  failed_when: false
+  tags: [vault, sso]
+
+- name: Configure OIDC method + role (Forgejo IdP)
+  shell: |
+    export VAULT_ADDR="https://127.0.0.1:8200" VAULT_SKIP_VERIFY="true"
+    export VAULT_TOKEN=$(jq -r .root_token /root/vault-init.json)
+    OIDC_ID=$(vault kv get -field=client_id kv/sso/vault)
+    OIDC_SECRET=$(vault kv get -field=client_secret kv/sso/vault)
+    vault write auth/oidc/config \
+      oidc_discovery_url="https://forgejo.{{ domain }}" \
+      oidc_client_id="$OIDC_ID" \
+      oidc_client_secret="$OIDC_SECRET" \
+      default_role="default"
+    vault write auth/oidc/role/default \
+      bound_audiences="$OIDC_ID" \
+      allowed_redirect_uris="https://vault.{{ domain }}/ui/vault/auth/oidc/oidc/callback" \
+      user_claim="preferred_username" \
+      policies="default" \
+      verbose_oidc_logging="true"
+  no_log: true
+  when: oidc_role_check.rc != 0
+  tags: [vault, sso]
+
+# --- Auto-unseal on boot (seal-after-reboot fix). Same trust model as the
+# manual flow (keys stay on this disk); the unit just removes the human step.
+# Sealed-check inside the script makes it a no-op unless a restart sealed us.
+
+- name: Install auto-unseal helper script (root-only, no logs)
+  template:
+    src: vault-unseal.sh.j2
+    dest: /usr/local/bin/vault-unseal.sh
+    owner: root
+    group: root
+    mode: '0700'
+  tags: [vault, unseal]
+
+- name: Install auto-unseal systemd unit
+  template:
+    src: vault-unseal.service.j2
+    dest: /etc/systemd/system/vault-unseal.service
+    mode: '0644'
+  register: unseal_unit
+  tags: [vault, unseal]
+
+- name: Reload systemd when unit is new
+  systemd:
+    daemon_reload: yes
+  when: unseal_unit is changed
+  tags: [vault, unseal]
+
+- name: Enable auto-unseal on boot (and prove wiring with one run now)
+  systemd:
+    name: vault-unseal
+    enabled: yes
+    state: started
+  tags: [vault, unseal]

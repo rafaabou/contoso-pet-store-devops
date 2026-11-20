@@ -1,0 +1,148 @@
+services:
+  mongodb:
+    image: mongo:6.0.6
+    container_name: 'mongo'
+    restart: always
+    ports:
+      - 27017:27017
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand('ping').ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - backend_services
+  rabbitmq:
+    image: rabbitmq:3.11.17-management-alpine
+    container_name: 'rabbitmq'
+    restart: always
+    environment:
+      - "RABBITMQ_DEFAULT_USER=username"
+      - "RABBITMQ_DEFAULT_PASS=password"
+    ports:
+      - 15672:15672
+      - 5672:5672
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - ../../rabbitmq_enabled_plugins:/etc/rabbitmq/enabled_plugins
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - backend_services
+  order-service:
+    build: ../order-service
+    container_name: 'order-service'
+    restart: always
+    ports:
+      - 3000:3000
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "-q", "http://order-service:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    environment:
+      - ORDER_QUEUE_HOSTNAME=rabbitmq
+      - ORDER_QUEUE_PORT=5672
+      - ORDER_QUEUE_USERNAME=username
+      - ORDER_QUEUE_PASSWORD=password
+      - ORDER_QUEUE_NAME=orders
+      - ORDER_QUEUE_RECONNECT_LIMIT=3
+    networks:
+      - backend_services
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+  makeline-service:
+    build: ../makeline-service
+    container_name: 'makeline-service'
+    restart: always
+    ports:
+      - 3001:3001
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "-q", "http://makeline-service:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    environment:
+      - ORDER_QUEUE_URI=amqp://rabbitmq:5672
+      - ORDER_QUEUE_USERNAME=username
+      - ORDER_QUEUE_PASSWORD=password
+      - ORDER_QUEUE_NAME=orders
+      - ORDER_DB_URI=mongodb://mongodb:27017
+      - ORDER_DB_NAME=orderdb
+      - ORDER_DB_COLLECTION_NAME=orders
+    networks:
+      - backend_services
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+  product-service:
+    build: ../product-service
+    container_name: 'product-service'
+    restart: always
+    ports:
+      - 3002:3002
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "-q", "http://product-service:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    environment:
+      # Without this, AI_SERVICE_URL defaults to http://127.0.0.1:5001 which
+      # inside compose points at THIS container - all /ai/* calls would fail.
+      - AI_SERVICE_URL=http://ai-service:5001
+    networks:
+      - backend_services
+    depends_on:
+      ai-service:
+        condition: service_healthy
+  virtual-customer:
+    build: ../virtual-customer
+    container_name: 'virtual-customer'
+    restart: always
+    environment:
+      - ORDER_SERVICE_URL=http://order-service:3000/
+      - ORDERS_PER_HOUR=60
+    networks:
+      - backend_services
+    depends_on:
+      order-service:
+        condition: service_healthy
+  ai-service:
+    build: ../ai-service
+    container_name: 'ai-service'
+    restart: always
+    ports:
+      - 5001:5001
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "-q", "http://ai-service:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    environment:
+      # At least one provider key must be set (from shell env or a .env file
+      # next to this compose file). Empty = provider not armed, chain skips it.
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_TEXT_MODEL=gemini-3.6-flash
+      - GEMINI_IMAGE_MODEL=gemini-2.5-flash-image
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      - AI_TEXT_PROVIDERS=gemini,nvidia
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
+      - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}
+      - XKIRO_API_KEY=${XKIRO_API_KEY:-}
+      - AI_IMAGE_PROVIDERS=gemini,cloudflare,xkiro
+    networks:
+      - backend_services
+volumes:
+  mongo-data:
+  rabbitmq-data:
+networks:
+  backend_services:
+    driver: bridge

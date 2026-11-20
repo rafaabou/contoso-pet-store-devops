@@ -1,0 +1,6 @@
+---
+- name: restart blackbox
+  ansible.builtin.systemd:
+    name: blackbox
+    state: restarted
+    daemon_reload: yes

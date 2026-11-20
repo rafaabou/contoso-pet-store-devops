@@ -1,0 +1,156 @@
+---
+global:
+  scrape_interval: {{ prometheus_scrape_interval }}
+  evaluation_interval: {{ prometheus_scrape_interval }}
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - localhost:9093
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # K3s master node
+  - job_name: "k3s-master"
+    static_configs:
+      - targets: ["{{ k3s_master_ip }}:9100"]
+        labels:
+          node: "k3s-master"
+          role: "master"
+
+  # K3s worker-1
+  - job_name: "k3s-worker-1"
+    static_configs:
+      - targets: ["{{ k3s_worker1_ip }}:9100"]
+        labels:
+          node: "k3s-worker-1"
+          role: "worker"
+
+  # K3s worker-2 (via Tailscale)
+  - job_name: "k3s-worker-2"
+    static_configs:
+      - targets: ["{{ k3s_worker2_ip }}:9100"]
+        labels:
+          node: "k3s-worker-2"
+          role: "worker"
+
+  # K3s API server
+  - job_name: "k3s-api"
+    static_configs:
+      - targets: ["{{ k3s_master_ip }}:6443"]
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+
+  # Blackbox: Gateway HTTPS names (TLS + cert expiry), probed FROM the
+  # monitoring VM (same LAN as .100 — no cross-PC paths).
+  - job_name: "blackbox-tls"
+    metrics_path: /probe
+    params:
+      module: [tls_page]
+    static_configs:
+      - targets:
+          - https://sonar.{{ domain }}/
+          - https://argocd.{{ domain }}/
+          - https://minio.{{ domain }}/
+          - https://forgejo.{{ domain }}/
+          - https://grafana.{{ domain }}/
+          - https://prometheus.{{ domain }}/
+          - https://alertmanager.{{ domain }}/
+          - https://jaeger.{{ domain }}/
+          - https://vault.{{ domain }}/ui/
+          - https://devops-devsecops.kdns.fr/
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  # S3 API (healthy = anonymous 403) + Loki API (no root page by design).
+  - job_name: "blackbox-tls-special"
+    metrics_path: /probe
+    static_configs:
+      - targets: ["https://s3.{{ domain }}/"]
+        labels:
+          __param_module: "tls_s3"
+      - targets: ["https://loki.{{ domain }}/loki/api/v1/labels"]
+        labels:
+          __param_module: "tls_page"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  # Native ports (mesh-independent view — survives ingress outages).
+  - job_name: "blackbox-plain"
+    metrics_path: /probe
+    params:
+      module: [http_page]
+    static_configs:
+      - targets:
+          - http://10.195.94.210:3000/login
+          - http://10.195.94.210:9090/-/healthy
+          - http://10.195.94.210:9093/-/healthy
+          - http://10.195.94.210:16686/
+          - http://10.195.94.210:8889/metrics
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  # Tailnet peers (probed FROM the monitoring VM over its own Tailscale —
+  # the exact path tonight's outage took down). Vault has no tailnet peer;
+  # it stays covered by its HTTPS probes above.
+  - job_name: "blackbox-icmp"
+    metrics_path: /probe
+    params:
+      module: [icmp_peer]
+    static_configs:
+      - targets:
+          - 100.99.186.85
+          - 100.88.159.38
+          - 100.110.171.119
+          - 100.119.206.35
+          - 100.100.13.113
+          - 100.113.54.77
+          - 100.73.135.124
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  # Vault serves TLS-only (self-signed): plain-HTTP probe can never succeed.
+  # Module originates HTTPS skipping verify (LAN hop; still encrypted).
+  - job_name: "blackbox-direct-tls"
+    metrics_path: /probe
+    params:
+      module: [https_insecure]
+    static_configs:
+      - targets:
+          - https://10.195.94.200:8200/v1/sys/seal-status
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115

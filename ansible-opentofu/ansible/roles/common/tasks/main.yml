@@ -1,0 +1,82 @@
+# ============================================
+# Role: common
+# Base configuration for all k3s nodes
+# ============================================
+---
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Install required packages
+  apt:
+    name:
+      - curl
+      - wget
+      - iptables
+      - gnupg
+      - lsb-release
+      - apt-transport-https
+      - ca-certificates
+      - software-properties-common
+      - python3-pip
+      - jq
+      - net-tools
+      - dnsutils
+    state: present
+
+- name: Set iptables to nft
+  alternatives:
+    name: iptables
+    path: /usr/sbin/iptables-nft
+  ignore_errors: yes
+
+- name: Set ip6tables to nft
+  alternatives:
+    name: ip6tables
+    path: /usr/sbin/ip6tables-nft
+  ignore_errors: yes
+
+- name: Check br_netfilter module is loaded (via host kernel)
+  stat:
+    path: /sys/module/br_netfilter
+  register: br_netfilter_loaded
+
+- name: Verify br_netfilter is available
+  assert:
+    that: br_netfilter_loaded.stat.exists
+    fail_msg: "br_netfilter not loaded. On host run: incus config set <container> linux.kernel_modules=<existing>,br_netfilter && incus restart <container>"
+
+- name: Check overlay module is loaded (via host kernel)
+  stat:
+    path: /sys/module/overlay
+  register: overlay_loaded
+
+- name: Verify overlay is available
+  assert:
+    that: overlay_loaded.stat.exists
+    fail_msg: "overlay not loaded. On host run: incus config set <container> linux.kernel_modules=<existing>,overlay && incus restart <container>"
+
+- name: Enable IP forwarding (sysctl)
+  sysctl:
+    name: "{{ item }}"
+    value: '1'
+    sysctl_set: yes
+    state: present
+    reload: yes
+  loop:
+    - net.ipv4.ip_forward
+    - net.bridge.bridge-nf-call-iptables
+    - net.bridge.bridge-nf-call-ip6tables
+
+- name: Disable swap
+  command: swapoff -a
+  when: ansible_facts.swaptotal_mb > 0
+  ignore_errors: yes
+
+- name: Remove swap from fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: '\sswap\s'
+    state: absent
+  ignore_errors: yes

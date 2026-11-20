@@ -1,0 +1,60 @@
+# ============================================
+# Role: metallb
+# Install MetalLB for LoadBalancer services
+# ============================================
+---
+- name: Check if MetalLB is installed
+  command: kubectl get ns metallb-system
+  register: metallb_ns
+  changed_when: false
+  ignore_errors: yes
+
+- name: Install MetalLB
+  command: "kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/{{ metallb_version }}/config/manifests/metallb-native.yaml"
+  when: metallb_ns.rc != 0
+
+- name: Wait for MetalLB pods
+  command: >
+    kubectl wait --namespace metallb-system
+    --for=condition=ready pod
+    --selector=app=metallb
+    --timeout=90s
+  when: metallb_ns.rc != 0
+
+- name: Check if IPAddressPool exists
+  command: kubectl get ipaddresspool -n metallb-system
+  register: metallb_pool_check
+  changed_when: false
+  ignore_errors: yes
+
+- name: Create MetalLB IPAddressPool
+  shell: |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: metallb.io/v1beta1
+    kind: IPAddressPool
+    metadata:
+      name: default-address-pool
+      namespace: metallb-system
+    spec:
+      addresses:
+      - {{ metallb_pool }}
+    ---
+    apiVersion: metallb.io/v1beta1
+    kind: L2Advertisement
+    metadata:
+      name: default
+      namespace: metallb-system
+    EOF
+  when: metallb_pool_check.rc != 0 or metallb_pool_check.stdout == ""
+
+# Stretched cluster: the speaker on the cross-PC worker CrashLoops forever
+# (L2 ARP can't cross PCs) and can never usefully announce PC1-bridge IPs.
+# Confine speakers to PC1-local nodes. Re-applied manifests reset affinity,
+# so this patch runs unconditionally (convergent: no-op when already set).
+- name: Confine MetalLB speakers to PC1-local nodes
+  command: >
+    kubectl -n metallb-system patch daemonset speaker --type=merge
+    -p '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["k3s-master","k3s-worker-1"]}]}]}}}}}}}'
+  register: speaker_pin
+  changed_when: "'no change' not in speaker_pin.stdout"
+  ignore_errors: yes

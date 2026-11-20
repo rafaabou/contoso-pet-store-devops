@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenTelemetry Collector
+Documentation=https://opentelemetry.io/docs/collector/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=otel
+Group=otel
+ExecStart=/opt/otelcol/otelcol --config=/etc/otelcol/config.yml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

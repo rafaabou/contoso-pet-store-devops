@@ -1,0 +1,61 @@
+# vault-values-standalone.yaml
+# Simple standalone Vault for development/learning
+
+# Vault Agent Injector
+injector:
+  enabled: false
+  # Points to the single vault pod
+  # externalVaultAddr: "http://vault.platform.svc.cluster.local:8200"
+
+# Vault Server Configuration
+server:
+  # Standalone mode (1 pod only)
+  standalone:
+    enabled: true
+    
+    config: |
+      ui = true
+      
+      listener "tcp" {
+        tls_disable = 1
+        address = "[::]:8200"
+        cluster_address = "[::]:8201"
+      }
+      
+      storage "file" {
+        path = "/vault/data"
+      }
+      
+      # Disable mlock for development
+      disable_mlock = true
+
+  # ADD THESE ISTIO ANNOTATIONS
+  annotations:
+    traffic.sidecar.istio.io/excludeInboundPorts: "8200,8201"
+    traffic.sidecar.istio.io/excludeOutboundPorts: "8200,8201"
+    sidecar.istio.io/inject: "false"  # Completely disable Istio sidecar for Vault    
+  
+  # Resources (adjust based on your cluster)
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  
+  # Data storage
+  dataStorage:
+    enabled: true
+    size: 1Gi
+    storageClass: gp2  # Uses default storage class
+    accessMode: ReadWriteOnce
+  
+  # HA disabled
+  ha:
+    enabled: false
+
+# UI Configuration
+ui:
+  enabled: true
+  serviceType: "ClusterIP"

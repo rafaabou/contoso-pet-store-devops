@@ -1,0 +1,12 @@
+[Unit]
+Description=Auto-unseal Vault from init file (seal-after-reboot fix)
+Wants=vault.service
+After=vault.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/vault-unseal.sh
+
+[Install]
+WantedBy=multi-user.target

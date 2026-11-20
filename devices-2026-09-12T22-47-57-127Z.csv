@@ -1,0 +1,10 @@
+Device name,Device ID,OS,OS Version,Domain,Tailscale version,Tags,Created,Last seen,Key expiry,Tailscale IPs,Endpoints,Subnet router,Approved subnet routes,Unapproved subnet routes,Exit node,Ephemeral,Shared in,Tailscale SSH,Funnel
+antix,n1J1LmBcAL11CNTRL,linux,7.0.0-31-generic,antix.tail15f6b1.ts.net,1.102.4-t3caf7d9e7-g084ee3b64,,2026-09-06T06:44:50Z,,2027-03-05T06:44:50Z,"100.99.186.85,fd7a:115c:a1e0::9a01:bac9",,true,10.195.94.0/24,,,,,true,
+home,ng8LBZUeJ121CNTRL,linux,7.0.0-14-generic,home.tail15f6b1.ts.net,1.102.3-t9329c3677-ga522f65e9,,2026-09-06T07:21:27Z,,2027-03-05T07:21:27Z,"100.110.171.119,fd7a:115c:a1e0::5036:ab78",,true,10.195.95.0/24,,,,,,
+k3s-worker-2,ncfBzf47aE11CNTRL,linux,7.0.0-14-generic,k3s-worker-2.tail15f6b1.ts.net,1.102.3-t9329c3677-ga522f65e9,,2026-09-07T22:32:48Z,,2027-03-06T22:32:48Z,"100.100.13.113,fd7a:115c:a1e0::ad36:d72",,,,,,,,,
+forgejo-ci,nozcvGTdH911CNTRL,linux,7.0.0-14-generic,forgejo-ci.tail15f6b1.ts.net,1.102.3-t9329c3677-ga522f65e9,,2026-09-09T21:15:03Z,,2027-03-08T21:15:03Z,"100.88.159.38,fd7a:115c:a1e0::5436:9f27",,,,,,,,,
+k3s-master,ny63qhL5s611CNTRL,linux,7.0.0-31-generic,k3s-master.tail15f6b1.ts.net,1.102.3-t9329c3677-ga522f65e9,,2026-09-09T01:23:20Z,,2027-03-08T01:23:20Z,"100.119.206.35,fd7a:115c:a1e0::5736:ce24",,,,,,,,,
+k3s-monitoring,nUAbJ4EePc11CNTRL,linux,7.0.0-31-generic,k3s-monitoring.tail15f6b1.ts.net,1.102.3-t9329c3677-ga522f65e9,,2026-09-10T08:45:12Z,,2027-03-09T08:45:12Z,"100.67.95.124,fd7a:115c:a1e0::736:5f7d",,,,,,,,,
+k3s-worker-1,nxEKNoASeF11CNTRL,linux,7.0.0-31-generic,k3s-worker-1.tail15f6b1.ts.net,1.102.4-t3caf7d9e7-g084ee3b64,,2026-09-12T21:41:39Z,,2027-03-11T21:41:39Z,"100.68.126.108,fd7a:115c:a1e0::2c36:7e6d",,,,,,,,,
+runner-1,nvHLEbz7TX11CNTRL,linux,7.0.0-14-generic,runner-1.tail15f6b1.ts.net,1.102.3-t9329c3677-ga522f65e9,,2026-09-09T21:16:11Z,,2027-03-08T21:16:11Z,"100.113.54.77,fd7a:115c:a1e0::9e36:364e",,,,,,,,,
+sonarqube,nB4x74Xr8z11CNTRL,linux,7.0.0-14-generic,sonarqube.tail15f6b1.ts.net,1.102.3-t9329c3677-ga522f65e9,,2026-09-09T10:22:03Z,,2027-03-08T10:22:03Z,"100.73.135.124,fd7a:115c:a1e0::c936:877d",,,,,,,,,

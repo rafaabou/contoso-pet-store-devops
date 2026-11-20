@@ -1,0 +1,25 @@
+---
+# ============================================
+# Playbook: Applications Deployment
+# Run: ansible-playbook playbooks/site-apps.yml
+# ============================================
+
+- name: Create application namespace
+  hosts: k3s_master
+  become: true
+  tasks:
+    - name: Create namespace
+      shell: kubectl create namespace application --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_created
+      changed_when: "'created' in ns_created.stdout"
+
+- name: Deploy application services
+  hosts: k3s_master
+  become: true
+  tasks:
+    - name: Show deployment instructions
+      debug:
+        msg: |
+          Applications will be deployed here.
+          Use ArgoCD or kubectl to deploy your services.
+          Namespace: application

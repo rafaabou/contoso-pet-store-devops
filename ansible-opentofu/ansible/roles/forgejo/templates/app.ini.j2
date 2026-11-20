@@ -1,0 +1,32 @@
+; Managed by Ansible (role forgejo). Created once; edit by hand after.
+APP_NAME = Forgejo
+RUN_MODE = prod
+RUN_USER = git
+
+[server]
+PROTOCOL         = http
+DOMAIN           = forgejo.{{ domain }}
+ROOT_URL         = https://forgejo.{{ domain }}/
+HTTP_ADDR        = 0.0.0.0
+HTTP_PORT        = {{ forgejo_http_port }}
+DISABLE_SSH      = false
+SSH_PORT         = 22
+LFS_HTTP_AUTH_EXPIRY = 60m
+
+[database]
+DB_TYPE = sqlite3
+PATH    = /var/lib/forgejo/data/forgejo.db
+
+[security]
+INSTALL_LOCK = true
+
+[service]
+DISABLE_REGISTRATION = true
+REQUIRE_SIGNIN_VIEW  = false
+
+[actions]
+ENABLED = true
+DEFAULT_ACTIONS_URL = https://data.forgejo.org
+
+[actions_log]
+RETENTION_DAYS = 90

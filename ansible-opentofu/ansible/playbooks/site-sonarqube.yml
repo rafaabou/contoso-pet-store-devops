@@ -1,0 +1,328 @@
+---
+# ============================================
+# Playbook: SonarQube Community Build + Branch Plugin
+# Run: ansible-playbook playbooks/site-sonarqube.yml
+# ============================================
+
+- name: Install PostgreSQL on dedicated partition
+  hosts: sonarqube_server
+  become: true
+  roles:
+    - postgres-local
+
+- name: Install SonarQube on dedicated server
+  hosts: sonarqube_server
+  become: true
+  vars:
+    sq_version: "{{ sonarqube_version }}"
+    plugin_version: "{{ sonarqube_plugin_version }}"
+    sq_install_dir: "/opt/sonarqube"
+    sonar_user: "sonarqube"
+    sonar_db: "sonarqube"
+    sonar_db_user: "sonarqube"
+    pg_version: "16"
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: [sonarqube, packages]
+
+    - name: Install dependencies
+      apt:
+        name:
+          - curl
+          - wget
+          - unzip
+          - gnupg
+          - "postgresql-{{ pg_version }}"
+          - postgresql-contrib
+          - openjdk-21-jdk-headless
+        state: present
+      tags: [sonarqube, packages]
+
+    - name: Create sonarqube system user
+      user:
+        name: "{{ sonar_user }}"
+        shell: /bin/bash
+        system: yes
+        create_home: no
+      tags: [sonarqube, config]
+
+    - name: Create SonarQube directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ sonar_user }}"
+        group: "{{ sonar_user }}"
+        mode: '0755'
+      loop:
+        - "{{ sq_install_dir }}"
+        - "{{ sq_install_dir }}/conf"
+        - "{{ sq_install_dir }}/data"
+        - "{{ sq_install_dir }}/extensions"
+        - "{{ sq_install_dir }}/extensions/plugins"
+        - "{{ sq_install_dir }}/logs"
+        - "{{ sq_install_dir }}/web"
+      tags: [sonarqube, config]
+
+    - name: Check if DB password already exists
+      stat:
+        path: /root/sonarqube-db-password
+      register: db_pass_file
+      tags: [sonarqube, config]
+
+    - name: Generate database password (first run only)
+      shell: openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 24 > /root/sonarqube-db-password && chmod 0600 /root/sonarqube-db-password
+      when: not db_pass_file.stat.exists
+      tags: [sonarqube, config]
+
+    - name: Read DB password from file
+      slurp:
+        src: /root/sonarqube-db-password
+      register: db_pass_b64
+      tags: [sonarqube, config]
+
+    - name: Set fact for DB password
+      set_fact:
+        sonar_db_pass: "{{ db_pass_b64.content | b64decode | trim }}"
+      tags: [sonarqube, config]
+
+    - name: Create PostgreSQL user
+      command: >
+        sudo -u postgres psql -c
+        "CREATE USER {{ sonar_db_user }} WITH ENCRYPTED PASSWORD '{{ sonar_db_pass }}';"
+      register: pg_user
+      changed_when: "'CREATE ROLE' in pg_user.stdout"
+      failed_when: pg_user.rc != 0 and 'already exists' not in pg_user.stderr
+      tags: [sonarqube, database]
+
+    - name: Create PostgreSQL database
+      command: >
+        sudo -u postgres psql -c
+        "CREATE DATABASE {{ sonar_db }} OWNER {{ sonar_db_user }};"
+      register: pg_db
+      changed_when: "'CREATE DATABASE' in pg_db.stdout"
+      failed_when: pg_db.rc != 0 and 'already exists' not in pg_db.stderr
+      tags: [sonarqube, database]
+
+    - name: Grant PostgreSQL privileges
+      command: >
+        sudo -u postgres psql -c
+        "GRANT ALL PRIVILEGES ON DATABASE {{ sonar_db }} TO {{ sonar_db_user }};"
+      changed_when: false
+      tags: [sonarqube, database]
+
+    - name: Download SonarQube
+      get_url:
+        url: "https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-{{ sq_version }}.zip"
+        dest: /tmp/sonarqube.zip
+        mode: '0644'
+      register: sq_download
+      tags: [sonarqube, download]
+
+    # Idempotency must not trust download state alone: on a fresh container
+    # (or after a wipe) /tmp artifacts may pre-exist from an aborted run
+    # while /opt holds only the empty skeleton. Gate on the installed code.
+    - name: Check installed SonarQube code present
+      stat:
+        path: "{{ sq_install_dir }}/bin/linux-x86-64/sonar.sh"
+      register: sq_code
+      tags: [sonarqube, install]
+
+    - name: Extract SonarQube
+      unarchive:
+        src: /tmp/sonarqube.zip
+        dest: /tmp
+        remote_src: yes
+      when: sq_download.changed or not sq_code.stat.exists
+      tags: [sonarqube, install]
+
+    - name: Install SonarQube
+      shell: |
+        rm -rf {{ sq_install_dir }}
+        mv /tmp/sonarqube-{{ sq_version }} {{ sq_install_dir }}
+        chown -R {{ sonar_user }}:{{ sonar_user }} {{ sq_install_dir }}
+      when: sq_download.changed or not sq_code.stat.exists
+      tags: [sonarqube, install]
+
+    - name: Configure sonar.properties
+      blockinfile:
+        path: "{{ sq_install_dir }}/conf/sonar.properties"
+        block: |
+          # --- Database Configuration ---
+          sonar.jdbc.username={{ sonar_db_user }}
+          sonar.jdbc.password={{ sonar_db_pass }}
+          sonar.jdbc.url=jdbc:postgresql://localhost:5432/{{ sonar_db }}
+
+          # --- Elasticsearch ---
+          sonar.search.javaAdditionalOpts=-Dnode.store.allow_mmap=false
+
+          # --- Community Branch Plugin ---
+          sonar.web.javaAdditionalOpts=-javaagent:./extensions/plugins/sonarqube-community-branch-plugin-{{ plugin_version }}.jar=web
+          sonar.ce.javaAdditionalOpts=-javaagent:./extensions/plugins/sonarqube-community-branch-plugin-{{ plugin_version }}.jar=ce
+        owner: "{{ sonar_user }}"
+        group: "{{ sonar_user }}"
+        mode: '0644'
+      tags: [sonarqube, config]
+
+    - name: Set kernel parameters for SonarQube
+      sysctl:
+        name: vm.max_map_count
+        value: '262144'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      tags: [sonarqube, config]
+
+    - name: Set file limits for SonarQube
+      copy:
+        content: |
+          sonarqube - nofile 65536
+          sonarqube - nproc 4096
+        dest: /etc/security/limits.d/99-sonarqube.conf
+        mode: '0644'
+      tags: [sonarqube, config]
+
+    - name: Download Community Branch Plugin JAR
+      get_url:
+        url: "https://github.com/mc1arke/sonarqube-community-branch-plugin/releases/download/{{ plugin_version }}/sonarqube-community-branch-plugin-{{ plugin_version }}.jar"
+        dest: "/tmp/sonarqube-community-branch-plugin-{{ plugin_version }}.jar"
+        mode: '0644'
+      register: plugin_jar
+      tags: [sonarqube, plugin]
+
+    - name: Install Community Branch Plugin JAR
+      copy:
+        src: "/tmp/sonarqube-community-branch-plugin-{{ plugin_version }}.jar"
+        dest: "{{ sq_install_dir }}/extensions/plugins/sonarqube-community-branch-plugin-{{ plugin_version }}.jar"
+        remote_src: yes
+        owner: "{{ sonar_user }}"
+        group: "{{ sonar_user }}"
+        mode: '0644'
+      # sq reinstall wipes the install dir: recopy plugin even if its download didn't change
+      when: plugin_jar.changed or sq_download.changed or not sq_code.stat.exists
+      tags: [sonarqube, plugin]
+
+    - name: Download Community Branch Plugin Webapp
+      get_url:
+        url: "https://github.com/mc1arke/sonarqube-community-branch-plugin/releases/download/{{ plugin_version }}/sonarqube-webapp.zip"
+        dest: /tmp/sonarqube-webapp.zip
+        mode: '0644'
+      register: plugin_webapp
+      tags: [sonarqube, plugin]
+
+    - name: Extract Community Branch Plugin Webapp
+      unarchive:
+        src: /tmp/sonarqube-webapp.zip
+        dest: "{{ sq_install_dir }}/web/"
+        remote_src: yes
+      when: plugin_webapp.changed or sq_download.changed or not sq_code.stat.exists
+      tags: [sonarqube, plugin]
+
+    - name: Fix webapp ownership
+      file:
+        path: "{{ sq_install_dir }}/web/"
+        state: directory
+        owner: "{{ sonar_user }}"
+        group: "{{ sonar_user }}"
+        recurse: yes
+      tags: [sonarqube, plugin]
+
+    # unarchive doesn't always preserve +x (zip perms); without it systemd
+    # fails with 203/EXEC before SonarQube even starts.
+    - name: Ensure SonarQube scripts are executable
+      shell: |
+        chmod 755 {{ sq_install_dir }}/bin/linux-x86-64/sonar.sh
+        find {{ sq_install_dir }}/bin {{ sq_install_dir }}/elasticsearch/bin -name '*.sh' -exec chmod 755 {} + 2>/dev/null || true
+      tags: [sonarqube, config]
+
+    - name: Create SonarQube systemd service
+      copy:
+        content: |
+          [Unit]
+          Description=SonarQube service
+          After=network.target postgresql.service
+
+          [Service]
+          Type=forking
+          User={{ sonar_user }}
+          Group={{ sonar_user }}
+          WorkingDirectory={{ sq_install_dir }}
+          ExecStart={{ sq_install_dir }}/bin/linux-x86-64/sonar.sh start
+          ExecStop={{ sq_install_dir }}/bin/linux-x86-64/sonar.sh stop
+          PIDFile={{ sq_install_dir }}/bin/linux-x86-64/SonarQube.pid
+          LimitNOFILE=65536
+          LimitNPROC=4096
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=300
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/sonarqube.service
+        mode: '0644'
+      notify: restart sonarqube
+      tags: [sonarqube, service]
+
+    - name: Enable SonarQube service
+      systemd:
+        name: sonarqube
+        enabled: yes
+        daemon_reload: yes
+      tags: [sonarqube, service]
+
+    - name: Start SonarQube
+      systemd:
+        name: sonarqube
+        state: started
+      tags: [sonarqube, service]
+
+    - name: Wait for SonarQube to start
+      command: "curl -s -o /dev/null -w '%{http_code}' http://localhost:9000"
+      register: sq_health
+      until: sq_health.stdout == "200"
+      retries: 30
+      delay: 10
+      tags: [sonarqube, verify]
+
+    # Log lines use SPACES ("Deploy Community Branch Plugin / 26.5.0"),
+    # not hyphens — the old hyphen pattern matched nothing every time.
+    - name: Check Community Branch Plugin load status in logs
+      shell: |
+        grep -iE "Community Branch Plugin.*(Deploy|loaded|started)" {{ sq_install_dir }}/logs/web.log 2>/dev/null | tail -2 || true
+        grep -i "branch plugin" {{ sq_install_dir }}/logs/web.log {{ sq_install_dir }}/logs/sonar.log 2>/dev/null | grep -iE "incompat|unsupport|require|fail|error" | tail -3 || true
+      register: plugin_status
+      changed_when: false
+      tags: [sonarqube, verify]
+
+    - name: Show SonarQube status
+      debug:
+        msg: |
+          ============================================
+          SonarQube Community Build + Branch Plugin
+          ============================================
+          URL:        http://{{ ansible_host }}:9000
+          Version:    {{ sq_version }}
+          Plugin:     {{ plugin_version }}
+          DB Name:    {{ sonar_db }}
+          DB User:    {{ sonar_db_user }}
+          Logs:       {{ sq_install_dir }}/logs/
+          Status:     RUNNING
+          Plugin log evidence:
+          {{ plugin_status.stdout | default('(no plugin lines yet — check logs if branch analysis missing)') }}
+          ----------------------------------------------------------------
+          IF the plugin was REJECTED (incompatible/unsupported in logs):
+          fall back to the newest mutually-supported pair, e.g. in
+          inventory/group_vars/all.yml set sonarqube_version 26.5.0.122743
+          (plugin 26.5.0), then re-run this playbook (fresh DB recommended).
+          ============================================
+          Admin login: rotated (see Vault kv/sonarqube). Factory default admin/admin no longer valid.
+      tags: [sonarqube, info]
+
+  handlers:
+    - name: restart sonarqube
+      systemd:
+        name: sonarqube
+        state: restarted
+        daemon_reload: yes

@@ -1,0 +1,62 @@
+# Exposes the host-level MinIO (systemd on master, outside the cluster)
+# through the Istio Gateway. Wildcard DNS already resolves these names
+# to the gateway (.100) — no new DNS records needed.
+# - minio.<domain> → console UI (9001)
+# - s3.<domain>    → S3 API (9000)
+# Gateway terminates wildcard TLS; mesh→MinIO hop is plain HTTP on the
+# private LAN (same trust level as before; enable MinIO TLS separately if needed).
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: minio-ext
+  namespace: istio-ingress
+spec:
+  hosts:
+  - minio-ext.local
+  addresses:
+  - {{ ansible_host }}/32
+  ports:
+  - number: 9000
+    name: s3-api
+    protocol: HTTP
+  - number: 9001
+    name: console
+    protocol: HTTP
+  location: MESH_EXTERNAL
+  resolution: STATIC
+  endpoints:
+  - address: {{ ansible_host }}
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: minio-console
+  namespace: istio-ingress
+spec:
+  hosts:
+  - minio.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: minio-ext.local
+        port:
+          number: 9001
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: minio-api
+  namespace: istio-ingress
+spec:
+  hosts:
+  - s3.{{ domain }}
+  gateways:
+  - istio-ingress/main-gateway
+  http:
+  - route:
+    - destination:
+        host: minio-ext.local
+        port:
+          number: 9000

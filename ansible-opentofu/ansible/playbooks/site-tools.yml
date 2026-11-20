@@ -1,0 +1,11 @@
+---
+# ============================================
+# Playbook: Tools Installation
+# Run: ansible-playbook playbooks/site-tools.yml
+# ============================================
+
+- name: Install Kubernetes tools on master
+  hosts: k3s_master
+  become: true
+  roles:
+    - tools
